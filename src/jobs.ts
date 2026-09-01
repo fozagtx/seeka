@@ -37,36 +37,27 @@ async function saveJobs(): Promise<void> {
 
 // ─── Default jobs ─────────────────────────────────────────────────────────────
 
+function getEvery4HoursSchedule(): string {
+  const now = new Date();
+  const m = now.getMinutes();
+  const h = now.getHours();
+  const hours: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    hours.push((h + i * 4) % 24);
+  }
+  hours.sort((a, b) => a - b);
+  return `${m} ${hours.join(",")} * * *`;
+}
+
 async function addDefaultJobs(): Promise<void> {
   const defaults: CronJob[] = [
     {
-      id: "daily-general",
-      name: "Daily General Hackathon Search",
-      schedule: "0 9 * * *", // 9 AM every day
+      id: "every-4-hours",
+      name: "Continuous Hackathon Search",
+      schedule: getEvery4HoursSchedule(),
       query: "hackathon competition contest 2026 prize open registration",
       enabled: true,
-    },
-    {
-      id: "daily-ai",
-      name: "Daily AI/ML Hackathon Search",
-      schedule: "0 10 * * *", // 10 AM every day
-      query: "AI machine learning hackathon 2026 prize pool",
-      enabled: true,
-    },
-    {
-      id: "daily-web3",
-      name: "Daily Web3 Hackathon Search",
-      schedule: "0 11 * * *", // 11 AM every day
-      query: "blockchain web3 hackathon 2026 crypto competition",
-      enabled: true,
-    },
-    {
-      id: "weekly-sweep",
-      name: "Weekly Full Sweep",
-      schedule: "0 8 * * 1", // 8 AM every Monday
-      query: "", // uses all base queries
-      enabled: true,
-    },
+    }
   ];
 
   for (const job of defaults) {
@@ -100,7 +91,7 @@ function startJob(job: CronJob, onResult: (msg: string) => void): void {
     return;
   }
 
-  const task = cron.schedule(job.schedule, async () => {
+  const runTask = async () => {
     console.log(`[Jobs] Running job: ${job.name}`);
     jobs.get(job.id)!.lastRun = new Date().toISOString();
     await saveJobs();
@@ -112,7 +103,12 @@ function startJob(job: CronJob, onResult: (msg: string) => void): void {
     } catch (err) {
       onResult(`❌ *[Cron: ${job.name}]* Error: ${String(err)}`);
     }
-  });
+  };
+
+  // Run the job immediately when it starts
+  setTimeout(runTask, 0);
+
+  const task = cron.schedule(job.schedule, runTask);
 
   taskHandles.set(job.id, task);
 }
