@@ -1,0 +1,22 @@
+{
+  "name": "seeka",
+  "version": "1.0.0",
+  "description": "Telegram bot that tracks hackathons, competitions, and contests — searches via Exa + Firecrawl, pushes to Notion",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --hot run index.ts"
+  },
+  "dependencies": {
+    "@notionhq/client": "2.2.15",
+    "dotenv": "^17.4.2",
+    "exa-js": "^2.19.0",
+    "grammy": "^1.46.0",
+    "node-cron": "^4.6.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "typescript": "^5.9.3"
+  }
+}
