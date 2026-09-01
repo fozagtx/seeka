@@ -110,6 +110,21 @@ async function main() {
   console.log(`🌐 HTTP server running on http://localhost:${PORT}`);
   console.log(`   GET  /health — health check`);
   console.log(`   POST /run?q=<query> — trigger search via HTTP`);
+
+  // ─── Keep-alive ping (prevents Render free tier from sleeping) ──────────────
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+  if (RENDER_URL) {
+    const PING_INTERVAL = 10 * 60 * 1000; // every 10 minutes
+    setInterval(async () => {
+      try {
+        const res = await fetch(`${RENDER_URL}/health`);
+        console.log(`[Keep-alive] Pinged ${RENDER_URL}/health → ${res.status}`);
+      } catch (err) {
+        console.warn(`[Keep-alive] Ping failed:`, err);
+      }
+    }, PING_INTERVAL);
+    console.log(`💓 Keep-alive enabled — pinging ${RENDER_URL}/health every 10 min`);
+  }
 }
 
 main().catch((err) => {
