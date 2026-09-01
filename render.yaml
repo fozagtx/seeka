@@ -1,7 +1,7 @@
 services:
   - type: web
     name: seeka
-    runtime: node
+    runtime: bun
     buildCommand: "bun install"
     startCommand: "bun run index.ts"
     healthCheckPath: /health
