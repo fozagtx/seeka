@@ -1,8 +1,8 @@
 // ─── src/bot.ts ───────────────────────────────────────────────────────────────
 
 import { Bot, InlineKeyboard, type Context } from "grammy";
-import { runSearch, isSearchRunning } from "./pipeline.js";
-import { formatTelegramMessage } from "./types.js";
+import { runSearch } from "./pipeline.js";
+import { formatTelegramMessage, type PipelineCallbacks } from "./types.js";
 import type { Hackathon } from "./types.js";
 import {
   listJobs, addJob, removeJob, toggleJob,
@@ -19,37 +19,38 @@ type ConvState =
 
 const userState = new Map<number, ConvState>();
 
-export function createBot(adminChatId: string): Bot {
+export function createBot(
+  adminChatId: string,
+  makeCbs?: (label: string) => PipelineCallbacks  // injected from index.ts
+): Bot {
   const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!);
   const isAdmin = (ctx: Context) =>
     String(ctx.from?.id) === adminChatId || String(ctx.chat?.id) === adminChatId;
 
-  // Shared callbacks passed down from index.ts
-  const onNew = async (h: Hackathon) => {
-    try {
-      await bot.api.sendMessage(adminChatId, formatTelegramMessage(h), {
-        parse_mode: "Markdown",
-        link_preview_options: { is_disabled: true },
-      });
-    } catch (err) {
-      console.error("[Bot] Error sending hackathon message:", err);
-    }
-  };
-  const onSummary = async (msg: string) => {
-    try {
-      await bot.api.sendMessage(adminChatId, msg, { parse_mode: "Markdown" });
-    } catch (err) {
-      console.error("[Bot] Error sending summary:", err);
-    }
-  };
+  // Internal makeCbs using bot.api (used when not injected from outside)
+  const _makeCbs = (label: string): PipelineCallbacks => ({
+    onStatus: async (msg) => {
+      try { await bot.api.sendMessage(adminChatId, msg, { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }); } catch {}
+    },
+    onNew: async (h: Hackathon) => {
+      try { await bot.api.sendMessage(adminChatId, formatTelegramMessage(h), { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }); } catch {}
+    },
+    onSummary: async (msg) => {
+      const prefix = label ? `🔄 *[${label}]*\n` : "";
+      try { await bot.api.sendMessage(adminChatId, prefix + msg, { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }); } catch {}
+    },
+  });
+
+  const getCbs = (label: string) => makeCbs ? makeCbs(label) : _makeCbs(label);
 
   // ─── /start & /help ───────────────────────────────────────────────────────
   bot.command("start", async (ctx) => {
     await ctx.reply(
       `👋 *Seeka — Hackathon Tracker*\n\n` +
-      `I hunt hackathons & competitions every *4 hours* and send them here + to Notion.\n\n` +
+      `I hunt hackathons every *4 hours* using AI agent search across the web + X/Twitter.\n` +
+      `Each new find is sent here + saved to Notion.\n\n` +
       `*Commands:*\n` +
-      `🔍 /search — Sweep all platforms now\n` +
+      `🔍 /search — Full sweep now\n` +
       `📝 /custom — Search with your own query\n` +
       `📋 /jobs — View scheduled jobs\n` +
       `➕ /addjob — Add a new job\n` +
@@ -59,23 +60,13 @@ export function createBot(adminChatId: string): Bot {
       `▶️ /runjob — Run a job right now`,
       { parse_mode: "Markdown" }
     );
-
-    if (!isAdmin(ctx)) return;
-    if (isSearchRunning()) {
-      await ctx.reply("⏳ A search is already running. Results will keep coming in.");
-      return;
-    }
-    await ctx.reply("🔍 Running first search now... results appear one by one as found.");
-    runSearch(undefined, onNew)
-      .then(({ message }) => onSummary(`🔍 *[First Run]*\n${message}`))
-      .catch((err) => onSummary(`❌ *[First Run]* Error: ${String(err)}`));
   });
 
   bot.command("help", async (ctx) => ctx.reply(
-    `*Seeka Commands:*\n\n` +
+    `*Commands:*\n\n` +
     `/search — Full sweep now\n` +
     `/custom <query> — Custom search\n` +
-    `/jobs — List jobs\n` +
+    `/jobs — List scheduled jobs\n` +
     `/addjob — Add cron job\n` +
     `/removejob — Delete job\n` +
     `/togglejob — Pause/resume\n` +
@@ -91,13 +82,8 @@ export function createBot(adminChatId: string): Bot {
   // ─── /search ─────────────────────────────────────────────────────────────
   bot.command("search", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-    if (isSearchRunning()) {
-      return ctx.reply("⏳ A search is already running. Results will keep coming in.");
-    }
-    await ctx.reply("🔍 Starting full sweep... results will appear one by one as found.");
-    runSearch(undefined, onNew)
-      .then(({ message }) => onSummary(`📊 *Search complete*\n${message}`))
-      .catch((err) => onSummary(`❌ Search failed: ${err}`));
+    await ctx.reply("🔍 Starting full sweep — results appear as found...", { parse_mode: "Markdown" });
+    runSearch(undefined, getCbs("Manual Search")).catch(console.error);
   });
 
   // ─── /custom ─────────────────────────────────────────────────────────────
@@ -105,12 +91,11 @@ export function createBot(adminChatId: string): Bot {
     if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
     const query = ctx.match?.trim();
     if (query) {
-      await executeCustomSearch(ctx, query, onNew, onSummary);
+      await ctx.reply(`🔍 Searching: *${query}*\n\nResults appear as found...`, { parse_mode: "Markdown" });
+      runSearch(query, getCbs(`Custom: ${query}`)).catch(console.error);
     } else {
       userState.set(ctx.from!.id, { step: "awaiting_search_query" });
-      await ctx.reply("📝 What to search for?\n\n_Example: AI hackathon prize over $10k_", {
-        parse_mode: "Markdown",
-      });
+      await ctx.reply("📝 What to search for?\n_Example: climate hackathon $50k prize_", { parse_mode: "Markdown" });
     }
   });
 
@@ -121,10 +106,11 @@ export function createBot(adminChatId: string): Bot {
     if (!jobs.length) return ctx.reply("No jobs yet. Use /addjob.");
     const list = jobs.map((j, i) =>
       `${i + 1}. ${j.enabled ? "✅" : "⏸"} *${j.name}*\n` +
-      `   \`${j.schedule}\` — _${j.query || "Full sweep"}_\n` +
-      `   Last run: ${j.lastRun ? new Date(j.lastRun).toLocaleString() : "Never"}`
+      `   ⏰ \`${j.schedule}\`\n` +
+      `   🔍 _${j.query || "Full sweep"}_\n` +
+      `   🕐 Last run: ${j.lastRun ? new Date(j.lastRun).toLocaleString() : "Never"}`
     ).join("\n\n");
-    await ctx.reply(`*📋 Jobs (${jobs.length}):*\n\n${list}`, { parse_mode: "Markdown" });
+    await ctx.reply(`*📋 Scheduled Jobs (${jobs.length}):*\n\n${list}`, { parse_mode: "Markdown" });
   });
 
   // ─── /addjob ─────────────────────────────────────────────────────────────
@@ -149,7 +135,7 @@ export function createBot(adminChatId: string): Bot {
   bot.command("togglejob", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
     const jobs = listJobs();
-    if (!jobs.length) return ctx.reply("No jobs configured.");
+    if (!jobs.length) return ctx.reply("No jobs.");
     const kb = new InlineKeyboard();
     jobs.forEach((j) => kb.text(`${j.enabled ? "⏸" : "▶️"} ${j.name}`, `toggle:${j.id}`).row());
     kb.text("Cancel", "cancel");
@@ -160,7 +146,7 @@ export function createBot(adminChatId: string): Bot {
   bot.command("setschedule", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
     const jobs = listJobs();
-    if (!jobs.length) return ctx.reply("No jobs configured.");
+    if (!jobs.length) return ctx.reply("No jobs.");
     const kb = new InlineKeyboard();
     jobs.forEach((j) => kb.text(`⏰ ${j.name} (${j.schedule})`, `setsched:${j.id}`).row());
     kb.text("Cancel", "cancel");
@@ -171,14 +157,14 @@ export function createBot(adminChatId: string): Bot {
   bot.command("runjob", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
     const jobs = listJobs();
-    if (!jobs.length) return ctx.reply("No jobs configured.");
+    if (!jobs.length) return ctx.reply("No jobs.");
     const kb = new InlineKeyboard();
     jobs.forEach((j) => kb.text(`▶️ ${j.name}`, `runnow:${j.id}`).row());
     kb.text("Cancel", "cancel");
     await ctx.reply("Run which job now?", { reply_markup: kb });
   });
 
-  // ─── Callback queries ─────────────────────────────────────────────────────
+  // ─── Callbacks ────────────────────────────────────────────────────────────
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     await ctx.answerCallbackQuery();
@@ -192,7 +178,7 @@ export function createBot(adminChatId: string): Bot {
     }
 
     if (data.startsWith("toggle:")) {
-      const job = await toggleJob(data.slice(7), onNew, onSummary);
+      const job = await toggleJob(data.slice(7), getCbs);
       if (job) await ctx.editMessageText(`${job.enabled ? "✅ Enabled" : "⏸ Paused"}: *${job.name}*`, { parse_mode: "Markdown" });
       else await ctx.editMessageText("❌ Not found.");
     }
@@ -208,8 +194,8 @@ export function createBot(adminChatId: string): Bot {
 
     if (data.startsWith("runnow:")) {
       const job = getJob(data.slice(7));
-      await ctx.editMessageText(`▶️ Running *${job?.name}*... results incoming`, { parse_mode: "Markdown" });
-      await runJobNow(data.slice(7), onNew, onSummary);
+      await ctx.editMessageText(`▶️ Running *${job?.name}*... results incoming 📨`, { parse_mode: "Markdown" });
+      await runJobNow(data.slice(7), getCbs);
     }
   });
 
@@ -218,18 +204,19 @@ export function createBot(adminChatId: string): Bot {
     if (!isAdmin(ctx)) return;
     const userId = ctx.from!.id;
     const text = ctx.message.text.trim();
-    if (text.startsWith("/")) return;
     const state = userState.get(userId) ?? { step: "idle" };
 
     if (state.step === "awaiting_search_query") {
       userState.set(userId, { step: "idle" });
-      await executeCustomSearch(ctx, text, onNew, onSummary);
+      await ctx.reply(`🔍 Searching: *${text}*\n\nResults appear as found...`, { parse_mode: "Markdown" });
+      runSearch(text, getCbs(`Custom: ${text}`)).catch(console.error);
       return;
     }
     if (state.step === "add_job_name") {
       userState.set(userId, { step: "add_job_schedule", name: text });
       await ctx.reply(
-        `✅ Name: *${text}*\n\nStep 2/3: Enter cron schedule:\n\`0 */4 * * *\` = every 4h\n\`0 9 * * *\` = 9 AM daily`,
+        `✅ Name: *${text}*\n\n*Step 2/3:* Enter cron schedule:\n` +
+        `\`0 */4 * * *\` = every 4h\n\`0 9 * * *\` = 9 AM daily\n\`0 9 * * 1\` = Mon 9 AM`,
         { parse_mode: "Markdown" }
       );
       return;
@@ -237,24 +224,22 @@ export function createBot(adminChatId: string): Bot {
     if (state.step === "add_job_schedule") {
       if (!isValidCron(text)) return ctx.reply("❌ Invalid cron. Try again.");
       userState.set(userId, { step: "add_job_query", name: state.name, schedule: text });
-      await ctx.reply(`✅ Schedule: \`${text}\`\n\nStep 3/3: Search query? (type \`all\` for full sweep)`, {
-        parse_mode: "Markdown",
-      });
+      await ctx.reply(`✅ Schedule: \`${text}\`\n\n*Step 3/3:* Search query? (type \`all\` for full sweep)`, { parse_mode: "Markdown" });
       return;
     }
     if (state.step === "add_job_query") {
       const query = text.toLowerCase() === "all" ? "" : text;
       userState.set(userId, { step: "idle" });
-      const newJob = await addJob({ name: state.name, schedule: state.schedule, query, enabled: true }, onNew, onSummary);
+      const newJob = await addJob({ name: state.name, schedule: state.schedule, query, enabled: true }, getCbs);
       await ctx.reply(
-        `✅ *Job Created!*\nName: ${newJob.name}\nSchedule: \`${newJob.schedule}\`\nQuery: _${newJob.query || "Full sweep"}_`,
+        `✅ *Job Created!*\n\nName: ${newJob.name}\nSchedule: \`${newJob.schedule}\`\nQuery: _${newJob.query || "Full sweep"}_\n\nID: \`${newJob.id}\``,
         { parse_mode: "Markdown" }
       );
       return;
     }
     if (state.step === "update_schedule_cron") {
       if (!isValidCron(text)) return ctx.reply("❌ Invalid cron. Try again.");
-      const job = await updateJobSchedule(state.jobId, text, onNew, onSummary);
+      const job = await updateJobSchedule(state.jobId, text, getCbs);
       userState.set(userId, { step: "idle" });
       await ctx.reply(job ? `✅ Updated *${job.name}*: \`${text}\`` : "❌ Failed.", { parse_mode: "Markdown" });
       return;
@@ -262,20 +247,6 @@ export function createBot(adminChatId: string): Bot {
   });
 
   return bot;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function executeCustomSearch(
-  ctx: Context,
-  query: string,
-  onNew: (h: Hackathon) => void,
-  onSummary: (msg: string) => void
-) {
-  await ctx.reply(`🔍 Searching: *${query}*\n\nResults appear one by one...`, { parse_mode: "Markdown" });
-  runSearch(query, onNew)
-    .then(({ message }) => onSummary(`📊 *Done*\n${message}`))
-    .catch((err) => onSummary(`❌ Error: ${err}`));
 }
 
 function isValidCron(expr: string): boolean {

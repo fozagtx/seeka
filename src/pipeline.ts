@@ -1,101 +1,159 @@
 // ─── src/pipeline.ts ──────────────────────────────────────────────────────────
-// Orchestrates: Exa search → Firecrawl scrape → Notion push → Telegram notify
+// Resilient orchestration: Exa agent search → Firecrawl → Notion → Telegram
 
-import { searchHackathons, searchByCustomQuery } from "./searcher.js";
+import { searchHackathons } from "./searcher.js";
 import { scrapeHackathonDetails } from "./scraper.js";
 import { pushToNotion } from "./notion.js";
+import { formatTelegramMessage } from "./types.js";
 import type { Hackathon } from "./types.js";
+
+export interface PipelineCallbacks {
+  onStatus: (msg: string) => Promise<void>;   // progress updates
+  onNew: (h: Hackathon) => Promise<void>;     // each new hackathon found
+  onSummary: (msg: string) => Promise<void>;  // final summary
+}
 
 export interface PipelineResult {
   found: number;
   pushed: number;
   skipped: number;
+  failed: number;
   hackathons: Hackathon[];
-  message: string;
 }
 
-let running = false;
-
-export function isSearchRunning(): boolean {
-  return running;
-}
-
-// onNew: called for each NEW hackathon pushed to Notion
 export async function runSearch(
-  customQuery?: string,
-  onNew?: (h: Hackathon) => void | Promise<void>
+  customQuery: string | undefined,
+  cb: PipelineCallbacks
 ): Promise<PipelineResult> {
-  if (running) {
-    return {
-      found: 0,
-      pushed: 0,
-      skipped: 0,
-      hackathons: [],
-      message: "⏳ A search is already running. Results will keep coming in.",
-    };
-  }
-  running = true;
+  const label = customQuery ? `"${customQuery}"` : "full sweep";
+  console.log(`[Pipeline] Starting: ${label}`);
+
+  await cb.onStatus(`🔎 *Search started* — ${label}`);
+
+  // ── Step 1: Exa search (agent + neural + X) ────────────────────────────────
+  let rawResults: Awaited<ReturnType<typeof searchHackathons>>;
   try {
-    return await executeSearch(customQuery, onNew);
-  } finally {
-    running = false;
-  }
-}
-
-async function executeSearch(
-  customQuery?: string,
-  onNew?: (h: Hackathon) => void | Promise<void>
-): Promise<PipelineResult> {
-  console.log(`[Pipeline] Starting search${customQuery ? ` for: "${customQuery}"` : " (full sweep)"}`);
-
-  // Step 1: Search with Exa
-  const searchResults = customQuery
-    ? await searchByCustomQuery(customQuery)
-    : await searchHackathons();
-
-  console.log(`[Pipeline] Found ${searchResults.length} raw results from Exa`);
-
-  if (searchResults.length === 0) {
-    return { found: 0, pushed: 0, skipped: 0, hackathons: [], message: "No results found." };
+    rawResults = await searchHackathons(
+      (msg) => cb.onStatus(msg).catch(() => {}),
+      customQuery
+    );
+  } catch (err) {
+    await cb.onSummary(`❌ Search failed at Exa stage: ${String(err)}`);
+    return { found: 0, pushed: 0, skipped: 0, failed: 0, hackathons: [] };
   }
 
-  // Step 2: Filter to likely hackathon pages
-  const filtered = searchResults.filter((r) =>
-    isLikelyHackathon(r.title + " " + r.url + " " + r.text)
-  );
-  console.log(`[Pipeline] Filtered to ${filtered.length} likely hackathon results`);
+  const { results, agentSummaries } = rawResults;
 
-  // Step 3: Scrape details with Firecrawl
+  // If agent produced summaries, send them as context
+  if (agentSummaries.length > 0) {
+    const combined = agentSummaries.filter(Boolean).join("\n\n").slice(0, 1000);
+    if (combined) {
+      await cb.onStatus(`🤖 *Agent research summary:*\n\n${combined}`).catch(() => {});
+    }
+  }
+
+  await cb.onStatus(`📡 Found *${results.length}* raw results — filtering & scraping...`);
+
+  // ── Step 2: Filter to likely hackathon pages ───────────────────────────────
+  const filtered = results.filter((r) => isLikelyHackathon(r.title + " " + r.url + " " + r.text));
+  console.log(`[Pipeline] ${filtered.length}/${results.length} pass hackathon filter`);
+
+  if (filtered.length === 0) {
+    await cb.onSummary(`⚠️ Found ${results.length} results but none matched hackathon criteria.`);
+    return { found: 0, pushed: 0, skipped: 0, failed: 0, hackathons: [] };
+  }
+
+  // ── Step 3: Firecrawl scrape (with retries) ────────────────────────────────
   const hackathons: Hackathon[] = [];
-  for (const result of filtered.slice(0, 25)) {
-    const h = await scrapeHackathonDetails(result);
-    if (h) hackathons.push(h);
-    await sleep(500);
+  const batch = filtered.slice(0, 20);
+  let scrapeErrors = 0;
+
+  for (let i = 0; i < batch.length; i++) {
+    const result = batch[i];
+    try {
+      const h = await scrapeHackathonDetails(result);
+      if (h) hackathons.push(h);
+    } catch (err) {
+      scrapeErrors++;
+      console.error(`[Pipeline] Scrape error for ${result.url}:`, err);
+    }
+
+    // Progress every 5
+    if ((i + 1) % 5 === 0 || i === batch.length - 1) {
+      await cb.onStatus(`📄 Scraped *${i + 1}/${batch.length}*...`).catch(() => {});
+    }
+    await sleep(400);
   }
 
-  console.log(`[Pipeline] Scraped ${hackathons.length} hackathons`);
+  console.log(`[Pipeline] Scraped ${hackathons.length} hackathons (${scrapeErrors} errors)`);
 
-  // Step 4: Push to Notion and notify per new entry
-  let pushed = 0;
-  let skipped = 0;
+  if (hackathons.length === 0) {
+    await cb.onSummary(`⚠️ Scraping returned no usable results. Try again or use /custom with a specific query.`);
+    return { found: 0, pushed: 0, skipped: 0, failed: scrapeErrors, hackathons: [] };
+  }
+
+  // ── Step 4: Push to Notion + notify per new entry ─────────────────────────
+  await cb.onStatus(`📋 Sending to Notion...`);
+  let pushed = 0, skipped = 0, failed = 0;
 
   for (const h of hackathons) {
-    const id = await pushToNotion(h);
-    if (id) {
-      pushed++;
-      if (onNew) await onNew(h);
-    } else {
-      skipped++;
+    try {
+      const id = await pushToNotion(h);
+      if (id) {
+        pushed++;
+        // Send individual formatted Telegram message immediately
+        await cb.onNew(h).catch(() => {});
+      } else {
+        skipped++;
+      }
+    } catch (err) {
+      failed++;
+      console.error(`[Pipeline] Notion push error for ${h.name}:`, err);
     }
-    await sleep(350);
+    await sleep(300);
   }
 
-  const message =
-    pushed > 0
-      ? `✅ Found *${hackathons.length}* events → sent *${pushed}* new to Notion (${skipped} already tracked)`
-      : `ℹ️ Found *${hackathons.length}* events — all ${skipped} already in Notion`;
+  // ── Step 5: Final summary ──────────────────────────────────────────────────
+  const notionUrl = `https://notion.so/${process.env.NOTION_DATABASE_ID?.replace(/-/g, "")}`;
+  const summaryLines = [
+    `✅ *Search Complete!*`,
+    ``,
+    `📊 *Stats:*`,
+    `• Scanned: ${results.length} pages`,
+    `• Matched: ${filtered.length} hackathon pages`,
+    `• Scraped: ${hackathons.length} events`,
+    `• 🆕 New → Notion: *${pushed}*`,
+    `• ⏭ Already tracked: ${skipped}`,
+    failed > 0 ? `• ❌ Errors: ${failed}` : null,
+    ``,
+    `🗂 [View in Notion](${notionUrl})`,
+  ].filter((l) => l !== null).join("\n");
 
-  return { found: hackathons.length, pushed, skipped, hackathons, message };
+  await cb.onSummary(summaryLines);
+
+  // ── Step 6: Notion snapshot — top 3 new ones ──────────────────────────────
+  if (pushed > 0) {
+    const newOnes = hackathons.filter((_, i) => i < pushed);
+    const snapshot = newOnes
+      .slice(0, 3)
+      .map(
+        (h, i) =>
+          `*${i + 1}. ${h.name}*\n` +
+          `   🏷 ${h.industry}${h.format ? ` · ${h.format}` : ""}\n` +
+          `   🏆 ${h.prizePool || "Prize TBD"}\n` +
+          `   ⏰ ${h.deadline || "Deadline TBD"}\n` +
+          `   🔗 ${h.link}`
+      )
+      .join("\n\n");
+
+    if (snapshot) {
+      await cb.onStatus(
+        `📸 *Notion snapshot — latest ${Math.min(pushed, 3)} added:*\n\n${snapshot}`
+      ).catch(() => {});
+    }
+  }
+
+  return { found: hackathons.length, pushed, skipped, failed, hackathons };
 }
 
 function isLikelyHackathon(text: string): boolean {
@@ -104,9 +162,8 @@ function isLikelyHackathon(text: string): boolean {
     "hackathon", "competition", "contest", "challenge", "bounty",
     "prize", "submission", "deadline", "apply now", "register",
     "devpost", "devfolio", "hackerearth", "mlh", "lablab",
+    "hackfest", "buildathon", "sprint", "datathon",
   ].some((k) => t.includes(k));
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }

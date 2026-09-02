@@ -68,6 +68,12 @@ export interface SearchResult {
   author?: string;
 }
 
+export interface PipelineCallbacks {
+  onStatus: (msg: string) => Promise<void>;
+  onNew: (h: Hackathon) => Promise<void>;
+  onSummary: (msg: string) => Promise<void>;
+}
+
 export function formatTelegramMessage(h: Hackathon): string {
   const category = [h.industry.split(" /")[0], h.format]
     .filter(Boolean)
