@@ -1,13 +1,14 @@
 // ─── src/types.ts ─────────────────────────────────────────────────────────────
-// Central type definitions for the hackathon tracker bot
 
 export interface Hackathon {
   id?: string; // Notion page ID after saving
   name: string;
+  organizer: string | null;
   description: string;
   startDate: string | null;
   deadline: string | null;
   prizePool: string | null;
+  format: "In-person" | "Remote" | "Hybrid" | null;
   industry: Industry;
   link: string;
   source: string;
@@ -54,10 +55,9 @@ export interface CronJob {
   id: string;
   name: string;
   schedule: string; // cron expression
-  query: string; // custom search query override
+  query: string;    // custom search query override
   enabled: boolean;
   lastRun?: string;
-  nextRun?: string;
 }
 
 export interface SearchResult {
@@ -66,4 +66,26 @@ export interface SearchResult {
   text: string;
   publishedDate?: string;
   author?: string;
+}
+
+export function formatTelegramMessage(h: Hackathon): string {
+  const category = [h.industry.split(" /")[0], h.format]
+    .filter(Boolean)
+    .join(" | ");
+
+  return (
+    `🆕 *New hackathon found:*\n\n` +
+    `*${escMd(h.name)}*\n` +
+    (h.organizer ? `Organizer: ${escMd(h.organizer)}\n` : "") +
+    (h.prizePool ? `Prize Pool: ${escMd(h.prizePool)}\n` : "") +
+    (h.deadline ? `Deadline: ${escMd(h.deadline)}\n` : "") +
+    `Category: ${escMd(category)}\n` +
+    `\n${escMd(h.description.slice(0, 600))}\n` +
+    `\n*Apply →*\n${h.link}`
+  );
+}
+
+function escMd(text: string): string {
+  // Telegram parse_mode "Markdown" (legacy) only needs these four escaped
+  return text.replace(/[_*`\[]/g, "\\$&");
 }

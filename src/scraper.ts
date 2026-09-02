@@ -2,7 +2,6 @@
 // Firecrawl-powered deep scraping of hackathon detail pages
 
 import type { SearchResult, Hackathon, Industry } from "./types.js";
-import { INDUSTRIES } from "./types.js";
 
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v1";
 
@@ -50,9 +49,9 @@ export async function scrapeHackathonDetails(
 
     const md = data.data.markdown || "";
     const meta = data.data.metadata || {};
+    const combined = md + " " + result.text;
 
-    const name =
-      meta.ogTitle || meta.title || result.title || "Unnamed Hackathon";
+    const name = meta.ogTitle || meta.title || result.title || "Unnamed Hackathon";
     const description =
       extractDescription(md) ||
       meta.ogDescription ||
@@ -61,10 +60,12 @@ export async function scrapeHackathonDetails(
 
     return {
       name: cleanText(name),
+      organizer: extractOrganizer(combined),
       description: cleanText(description),
-      startDate: extractStartDate(md + " " + result.text),
-      deadline: extractDeadline(md + " " + result.text),
-      prizePool: extractPrizePool(md + " " + result.text),
+      startDate: extractStartDate(combined),
+      deadline: extractDeadline(combined),
+      prizePool: extractPrizePool(combined),
+      format: extractFormat(combined),
       industry: classifyIndustry(name + " " + description),
       link: result.url,
       source: extractSource(result.url),
@@ -77,15 +78,16 @@ export async function scrapeHackathonDetails(
   }
 }
 
-// Fallback: parse from Exa search result text alone
 function parseFromSearchResult(result: SearchResult): Hackathon {
   const combined = result.title + " " + result.text;
   return {
     name: cleanText(result.title || "Unnamed Event"),
+    organizer: extractOrganizer(combined),
     description: cleanText(result.text.slice(0, 600)),
     startDate: extractStartDate(combined),
     deadline: extractDeadline(combined),
     prizePool: extractPrizePool(combined),
+    format: extractFormat(combined),
     industry: classifyIndustry(combined),
     link: result.url,
     source: extractSource(result.url),
@@ -97,9 +99,21 @@ function parseFromSearchResult(result: SearchResult): Hackathon {
 // ─── Extraction helpers ───────────────────────────────────────────────────────
 
 function extractDescription(md: string): string {
-  // Take first meaningful paragraph (>50 chars)
   const paragraphs = md.split("\n\n").filter((p) => p.trim().length > 50);
   return paragraphs[0]?.slice(0, 800) || "";
+}
+
+function extractOrganizer(text: string): string | null {
+  const patterns = [
+    /(?:organized by|organizer|hosted by|presented by|sponsor)[:\s]+([^\n,\.]{3,80})/i,
+    /(?:by|from)\s+([A-Z][A-Za-z\s&,]+(?:Inc|LLC|Labs|Foundation|Community|Network)?)/,
+    /(?:partner|partnered with)[:\s]+([^\n,\.]{3,60})/i,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) return m[1].trim().slice(0, 100);
+  }
+  return null;
 }
 
 function extractDeadline(text: string): string | null {
@@ -120,7 +134,6 @@ function extractStartDate(text: string): string | null {
   const patterns = [
     /(?:starts?|begins?|kicks? off|launch)[:\s]+([A-Z][a-z]+ \d{1,2},?\s?\d{4})/i,
     /(?:event date|date)[:\s]+([A-Z][a-z]+ \d{1,2},?\s?\d{4})/i,
-    /(?:from)[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
     /(\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}).*?(?:to|-)/i,
   ];
   for (const p of patterns) {
@@ -135,7 +148,7 @@ function extractPrizePool(text: string): string | null {
     /(?:prize[s]?|pool|reward|win|award)[:\s]*\$?([\d,]+(?:\.\d+)?[kKmM]?)/i,
     /\$([\d,]+(?:\.\d+)?[kKmM]?)\s*(?:prize|award|reward|pool|total)/i,
     /(?:total prize)[:\s]*\$?([\d,]+(?:\.\d+)?[kKmM]?)/i,
-    /prize[:\s]+([^\n]{3,60})/i,
+    /prize[:\s]+([^\n]{3,80})/i,
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -145,6 +158,14 @@ function extractPrizePool(text: string): string | null {
       return val;
     }
   }
+  return null;
+}
+
+function extractFormat(text: string): "In-person" | "Remote" | "Hybrid" | null {
+  const t = text.toLowerCase();
+  if (/(hybrid)/.test(t)) return "Hybrid";
+  if (/(in.person|on.site|onsite|physical|local event|host a fest|in your city)/.test(t)) return "In-person";
+  if (/(virtual|online|remote|digital event)/.test(t)) return "Remote";
   return null;
 }
 

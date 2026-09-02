@@ -1,5 +1,4 @@
 // ─── index.ts ─────────────────────────────────────────────────────────────────
-// Entry point — starts the HTTP server, bot, and cron jobs
 
 import { config } from "dotenv";
 config();
@@ -8,6 +7,8 @@ import { createBot } from "./src/bot.js";
 import { loadJobs, startAllJobs } from "./src/jobs.js";
 import { setupNotionDatabase, initSeenUrls } from "./src/notion.js";
 import { runSearch } from "./src/pipeline.js";
+import { formatTelegramMessage } from "./src/types.js";
+import type { Hackathon } from "./src/types.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID!;
@@ -15,115 +16,98 @@ const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID!;
 async function main() {
   console.log("🚀 Seeka — Hackathon Tracker Bot starting...");
 
-  // Validate required env vars
   const required = [
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_ADMIN_CHAT_ID",
-    "EXA_API_KEY",
-    "FIRECRAWL_API_KEY",
-    "NOTION_API_KEY",
-    "NOTION_DATABASE_ID",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_CHAT_ID",
+    "EXA_API_KEY", "FIRECRAWL_API_KEY",
+    "NOTION_API_KEY", "NOTION_DATABASE_ID",
   ];
-
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length > 0) {
-    console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
-    console.error("Copy .env.example to .env and fill in your API keys.");
+    console.error(`❌ Missing env vars: ${missing.join(", ")}`);
     process.exit(1);
   }
 
-  // Init Notion database schema
-  console.log("[Notion] Setting up database...");
   await setupNotionDatabase();
-
-  // Load previously seen URLs (deduplication)
-  console.log("[Notion] Loading existing entries...");
   await initSeenUrls();
 
-  // Create and configure bot
   const bot = createBot(ADMIN_CHAT_ID);
 
-  // Load and start cron jobs
-  console.log("[Jobs] Loading cron jobs...");
-  await loadJobs();
+  // ─── Callbacks ──────────────────────────────────────────────────────────────
 
-  startAllJobs(async (msg: string) => {
+  // Per-hackathon: send individual formatted message
+  const onNew = async (h: Hackathon) => {
+    try {
+      await bot.api.sendMessage(ADMIN_CHAT_ID, formatTelegramMessage(h), {
+        parse_mode: "Markdown",
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (err) {
+      console.error("[Bot] Error sending hackathon message:", err);
+    }
+  };
+
+  // Summary after each job run
+  const onSummary = async (msg: string) => {
     try {
       await bot.api.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: "Markdown" });
     } catch (err) {
-      console.error("[Server] Error sending cron result:", err);
+      console.error("[Bot] Error sending summary:", err);
     }
-  });
+  };
 
-  // Start bot (long polling)
-  console.log("[Bot] Starting long polling...");
+  // ─── Jobs ───────────────────────────────────────────────────────────────────
+  await loadJobs();
+  startAllJobs(onNew, onSummary);
+
+  // ─── Bot ────────────────────────────────────────────────────────────────────
   bot.start({
-    onStart: (info) => {
+    onStart: async (info) => {
       console.log(`✅ Bot started as @${info.username}`);
-      // Notify admin
-      bot.api
-        .sendMessage(
-          ADMIN_CHAT_ID,
-          `🟢 *Seeka Bot is online!*\n\nType /help to see available commands.`,
-          { parse_mode: "Markdown" }
-        )
+      await bot.api
+        .sendMessage(ADMIN_CHAT_ID, `🟢 *Seeka is online!*\n\nTap /start to run the first search.\nThen every *4 hours* automatically.\n\nType /help to see all commands.`, {
+          parse_mode: "Markdown",
+        })
         .catch(() => {});
     },
   });
 
-  // HTTP health check server
-  const server = Bun.serve({
+  // ─── HTTP server ─────────────────────────────────────────────────────────
+  Bun.serve({
     port: PORT,
     fetch(req) {
       const url = new URL(req.url);
-
       if (url.pathname === "/health") {
-        return new Response(
-          JSON.stringify({
-            status: "ok",
-            bot: "running",
-            timestamp: new Date().toISOString(),
-          }),
-          { headers: { "Content-Type": "application/json" } }
-        );
-      }
-
-      if (url.pathname === "/run" && req.method === "POST") {
-        // Manual trigger via HTTP (e.g., from external cron)
-        const query = url.searchParams.get("q") || undefined;
-        runSearch(query).then(({ pushed, message }) => {
-          bot.api
-            .sendMessage(ADMIN_CHAT_ID, `🌐 *[HTTP Trigger]*\n${message}`, {
-              parse_mode: "Markdown",
-            })
-            .catch(() => {});
+        return new Response(JSON.stringify({ status: "ok", timestamp: new Date().toISOString() }), {
+          headers: { "Content-Type": "application/json" },
         });
+      }
+      if (url.pathname === "/run" && req.method === "POST") {
+        const query = url.searchParams.get("q") || undefined;
+        runSearch(query, onNew)
+          .then(({ message }) => onSummary(`🌐 *[HTTP Trigger]*\n${message}`))
+          .catch(() => {});
         return new Response(JSON.stringify({ status: "triggered" }), {
           headers: { "Content-Type": "application/json" },
         });
       }
-
-      return new Response("Seeka Hackathon Tracker — OK", { status: 200 });
+      return new Response("Seeka OK", { status: 200 });
     },
   });
 
-  console.log(`🌐 HTTP server running on http://localhost:${PORT}`);
-  console.log(`   GET  /health — health check`);
-  console.log(`   POST /run?q=<query> — trigger search via HTTP`);
+  console.log(`🌐 HTTP server on http://localhost:${PORT}`);
 
-  // ─── Keep-alive ping (prevents Render free tier from sleeping) ──────────────
+  // ─── Keep-alive ping (prevents Render free tier sleep) ────────────────────
   const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
   if (RENDER_URL) {
-    const PING_INTERVAL = 10 * 60 * 1000; // every 10 minutes
     setInterval(async () => {
       try {
         const res = await fetch(`${RENDER_URL}/health`);
-        console.log(`[Keep-alive] Pinged ${RENDER_URL}/health → ${res.status}`);
+        console.log(`[Keep-alive] ${res.status}`);
       } catch (err) {
         console.warn(`[Keep-alive] Ping failed:`, err);
       }
-    }, PING_INTERVAL);
-    console.log(`💓 Keep-alive enabled — pinging ${RENDER_URL}/health every 10 min`);
+    }, 10 * 60 * 1000); // every 10 minutes
+    console.log(`💓 Keep-alive pinging ${RENDER_URL}/health every 10 min`);
   }
 }
 

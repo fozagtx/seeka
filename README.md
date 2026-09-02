@@ -47,7 +47,9 @@ Fill in `.env`:
 
 Required database properties (auto-created if missing):
 - `Name` (title)
+- `Organizer` (text)
 - `Industry` (select)
+- `Format` (select: In-person / Remote / Hybrid)
 - `Source` (select)
 - `Prize Pool` (text)
 - `Deadline` (text)
@@ -85,12 +87,11 @@ bun dev             # Dev mode with hot reload
 
 | Job | Schedule | Query |
 |-----|----------|-------|
-| Daily General | `0 9 * * *` (9 AM daily) | Full sweep |
+| Every 4 Hours | `0 */4 * * *` | Full sweep |
 | Daily AI/ML | `0 10 * * *` (10 AM daily) | AI/ML hackathons |
-| Daily Web3 | `0 11 * * *` (11 AM daily) | Blockchain/Web3 hackathons |
-| Weekly Sweep | `0 8 * * 1` (Monday 8 AM) | Everything |
+| Daily Web3 | `0 14 * * *` (2 PM daily) | Blockchain/Web3 hackathons |
 
-All jobs are configurable via Telegram — no code changes needed.
+Tap **/start** in Telegram to run the first sweep. After that it runs every 4 hours automatically. Each **new** hackathon is sent to Telegram as its own message (name, organizer, prize, deadline, category, apply link) and written to Notion. All jobs are configurable via Telegram — no code changes needed.
 
 ---
 
