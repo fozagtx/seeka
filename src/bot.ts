@@ -8,6 +8,7 @@ import {
   listJobs, addJob, removeJob, toggleJob,
   updateJobSchedule, runJobNow, getJob,
 } from "./jobs.js";
+import { dedupeNotion, formatDedupeResult } from "./dedupe-runner.js";
 
 type ConvState =
   | { step: "idle" }
@@ -57,7 +58,8 @@ export function createBot(
       `🗑️ /removejob — Remove a job\n` +
       `🔁 /togglejob — Pause / resume a job\n` +
       `⏰ /setschedule — Change a job's timing\n` +
-      `▶️ /runjob — Run a job right now`,
+      `▶️ /runjob — Run a job right now\n` +
+      `🧹 /dedupe — Find & remove Notion duplicates`,
       { parse_mode: "Markdown" }
     );
   });
@@ -71,7 +73,10 @@ export function createBot(
     `/removejob — Delete job\n` +
     `/togglejob — Pause/resume\n` +
     `/setschedule — Update timing\n` +
-    `/runjob — Run job now\n\n` +
+    `/runjob — Run job now\n` +
+    `/dedupe — Find duplicates in Notion\n` +
+    `/dedupe preview — Show what would be deleted\n` +
+    `/dedupe run — Actually delete duplicates\n\n` +
     `*Cron examples:*\n` +
     `\`0 */4 * * *\` = every 4h\n` +
     `\`0 9 * * *\` = 9 AM daily\n` +
@@ -162,6 +167,27 @@ export function createBot(
     jobs.forEach((j) => kb.text(`▶️ ${j.name}`, `runnow:${j.id}`).row());
     kb.text("Cancel", "cancel");
     await ctx.reply("Run which job now?", { reply_markup: kb });
+  });
+
+  // ─── /dedupe ─────────────────────────────────────────────────────────────
+  bot.command("dedupe", async (ctx) => {
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
+    const arg = ctx.match?.trim().toLowerCase();
+    const dryRun = arg !== "run";
+
+    const statusMsg = await ctx.reply(
+      dryRun ? "🔍 Scanning Notion for duplicates (preview only)..." : "🧹 Scanning + removing duplicates...",
+      { parse_mode: "Markdown" }
+    );
+
+    try {
+      const result = await dedupeNotion(dryRun);
+      const text = formatDedupeResult(result);
+      await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, text, { parse_mode: "Markdown" });
+    } catch (err) {
+      console.error("[Dedupe] Error:", err);
+      await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `❌ Dedupe failed: ${String(err)}`, { parse_mode: "Markdown" });
+    }
   });
 
   // ─── Callbacks ────────────────────────────────────────────────────────────

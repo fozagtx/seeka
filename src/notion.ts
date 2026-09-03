@@ -3,11 +3,23 @@
 
 import { Client } from "@notionhq/client";
 import type { Hackathon } from "./types.js";
+import {
+  loadHistory,
+  isDuplicate,
+  recordEntry,
+  saveHistory,
+  normalizeUrl,
+  normalizeTitle,
+  titleFingerprint,
+} from "./dedupe.js";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DB_ID = process.env.NOTION_DATABASE_ID!;
 
 const seenUrls = new Set<string>();
+const seenTitles = new Set<string>();
+
+export { normalizeUrl, normalizeTitle, titleFingerprint };
 
 export async function initSeenUrls(): Promise<void> {
   try {
@@ -17,19 +29,44 @@ export async function initSeenUrls(): Promise<void> {
       const res = await notion.databases.query({ database_id: DB_ID, start_cursor: cursor, page_size: 100 });
       for (const page of res.results) {
         const p = page as any;
-        if (p.properties?.Link?.url) seenUrls.add(p.properties.Link.url);
+        const url = p.properties?.Link?.url;
+        if (url) {
+          seenUrls.add(normalizeUrl(url));
+          const title = p.properties?.Name?.title?.[0]?.plain_text || "";
+          if (title) {
+            const key = titleFingerprint(title);
+            if (key) seenTitles.add(key);
+          }
+        }
       }
       hasMore = res.has_more;
       cursor = res.next_cursor ?? undefined;
     }
-    console.log(`[Notion] Loaded ${seenUrls.size} existing URLs`);
+    console.log(`[Notion] Loaded ${seenUrls.size} existing URLs, ${seenTitles.size} title fingerprints`);
   } catch (err) {
     console.error("[Notion] Error loading existing URLs:", err);
   }
 }
 
 export async function pushToNotion(hackathon: Hackathon): Promise<string | null> {
-  if (seenUrls.has(hackathon.link)) return null;
+  const normUrl = normalizeUrl(hackathon.link);
+  const titleKey = titleFingerprint(hackathon.name);
+
+  if (seenUrls.has(normUrl)) {
+    console.log(`[Notion] Skipped (URL dup): ${hackathon.name}`);
+    return null;
+  }
+  if (titleKey && seenTitles.has(titleKey)) {
+    console.log(`[Notion] Skipped (title dup): ${hackathon.name}`);
+    return null;
+  }
+
+  const dup = isDuplicate(hackathon.link, hackathon.name);
+  if (dup.dup) {
+    console.log(`[Notion] Skipped (history ${dup.reason}): ${hackathon.name}`);
+    return null;
+  }
+
   try {
     const page = await notion.pages.create({
       parent: { database_id: DB_ID },
@@ -37,7 +74,12 @@ export async function pushToNotion(hackathon: Hackathon): Promise<string | null>
       properties: buildProperties(hackathon),
       children: buildPageContent(hackathon),
     } as any);
-    seenUrls.add(hackathon.link);
+
+    seenUrls.add(normUrl);
+    if (titleKey) seenTitles.add(titleKey);
+    recordEntry(hackathon.link, hackathon.name, page.id);
+    await saveHistory();
+
     console.log(`[Notion] Created: ${hackathon.name}`);
     return page.id;
   } catch (err) {

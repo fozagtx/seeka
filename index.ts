@@ -6,6 +6,7 @@ config();
 import { createBot } from "./src/bot.js";
 import { loadJobs, startAllJobs } from "./src/jobs.js";
 import { setupNotionDatabase, initSeenUrls } from "./src/notion.js";
+import { loadHistory as loadDedupeHistory } from "./src/dedupe.js";
 import { runSearch } from "./src/pipeline.js";
 import { formatTelegramMessage } from "./src/types.js";
 import type { Hackathon, PipelineCallbacks } from "./src/types.js";
@@ -30,6 +31,7 @@ async function main() {
   // ── Notion setup ──────────────────────────────────────────────────────────
   await setupNotionDatabase();
   await initSeenUrls();
+  await loadDedupeHistory();
 
   // ── Bot ───────────────────────────────────────────────────────────────────
   const bot = createBot(ADMIN_CHAT_ID);
@@ -100,12 +102,11 @@ async function main() {
     console.log(`💓 Keep-alive pinging every 10 min`);
   }
 
-  // ── Start bot + first-run search ──────────────────────────────────────────
+  // ── Start bot ─────────────────────────────────────────────────────────────
   bot.start({
     onStart: async (info) => {
       console.log(`✅ Bot @${info.username} online`);
 
-      // Announce startup with cron schedule
       const jobs = (await import("./src/jobs.js")).listJobs();
       const jobLines = jobs
         .filter((j) => j.enabled)
@@ -114,14 +115,12 @@ async function main() {
 
       await bot.api.sendMessage(
         ADMIN_CHAT_ID,
-        `🟢 *Seeka is online!*\n\n` +
-        `⏰ *Scheduled searches:*\n${jobLines}\n\n` +
-        `🔍 Starting first search now...`,
-        { parse_mode: "Markdown" }
+        `🟢 *Seeka is online\\!*\n\n` +
+        `⏰ *Auto\\-scheduled searches:*\n${jobLines}\n\n` +
+        `👆 Type /search whenever you're ready\\.\n` +
+        `Cron jobs will fire automatically on schedule\\.`,
+        { parse_mode: "MarkdownV2" }
       ).catch(() => {});
-
-      // First-run search immediately
-      runSearch(undefined, makeCbs("First Run")).catch(console.error);
     },
   });
 }
