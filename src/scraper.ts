@@ -51,6 +51,12 @@ export async function scrapeHackathonDetails(
     const meta = data.data.metadata || {};
     const combined = md + " " + result.text;
 
+    // ── Drop pages that explicitly say the event has ended ──────────────────
+    if (isEventEnded(combined)) {
+      console.log(`[Scraper] Skipping ended event: ${result.url}`);
+      return null;
+    }
+
     const name = meta.ogTitle || meta.title || result.title || "Unnamed Hackathon";
     const description =
       extractDescription(md) ||
@@ -78,8 +84,12 @@ export async function scrapeHackathonDetails(
   }
 }
 
-function parseFromSearchResult(result: SearchResult): Hackathon {
+function parseFromSearchResult(result: SearchResult): Hackathon | null {
   const combined = result.title + " " + result.text;
+  if (isEventEnded(combined)) {
+    console.log(`[Scraper] Skipping ended (fallback): ${result.url}`);
+    return null;
+  }
   return {
     name: cleanText(result.title || "Unnamed Event"),
     organizer: extractOrganizer(combined),
@@ -217,4 +227,28 @@ function cleanText(text: string): string {
     .replace(/[^\x20-\x7E\n]/g, "")
     .trim()
     .slice(0, 1000);
+}
+
+function isEventEnded(text: string): boolean {
+  const t = text.toLowerCase();
+  const deadline = extractDeadline(text);
+  if (deadline) {
+    const parsed = new Date(deadline);
+    if (!isNaN(parsed.getTime()) && parsed < new Date()) return true;
+  }
+  const endedPatterns = [
+    /(?:event|competition|hackathon|submission)\s+(?:has|have)\s+(ended|closed|finished|concluded)/i,
+    /(?:thank you|thanks).{0,40}(?:participat|apply|submit|interest)/i,
+    /(?:closed|ended)\s+(?:on|:)\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
+    /(?:submissions?\s+(?:are|have?\s+been)?\s*(?:closed|ended|finished))/i,
+    /(?:no longer|not currently)\s+(?:accepting|open)/i,
+    /(?:this\s+(?:event|edition|competition|hackathon)\s+(?:is|has)\s+(?:over|finished|completed|done))/i,
+    /(?:past\s+event|past\s+(?:edition|competition|hackathon))/i,
+    /(?:the\s+results?\s+(?:are|have\s+been)\s+(?:announced|out|published|released))/i,
+    /(?:winners?\s+(?:announced|selected|chosen|revealed))/i,
+  ];
+  for (const p of endedPatterns) {
+    if (p.test(t)) return true;
+  }
+  return false;
 }
