@@ -103,26 +103,47 @@ async function main() {
   }
 
   // ── Start bot ─────────────────────────────────────────────────────────────
-  bot.start({
-    onStart: async (info) => {
-      console.log(`✅ Bot @${info.username} online`);
+  startBotWithRetry(bot, ADMIN_CHAT_ID).catch(console.error);
+}
 
-      const jobs = (await import("./src/jobs.js")).listJobs();
-      const jobLines = jobs
-        .filter((j) => j.enabled)
-        .map((j) => `• ${j.name}: \`${j.schedule}\``)
-        .join("\n");
+function startBotWithRetry(bot: ReturnType<typeof createBot>, adminChatId: string): Promise<void> {
+  const delays = [1_000, 5_000, 15_000, 30_000, 60_000, 120_000];
+  let attempt = 0;
 
-      await bot.api.sendMessage(
-        ADMIN_CHAT_ID,
-        `🟢 *Seeka is online\\!*\n\n` +
-        `⏰ *Auto\\-scheduled searches:*\n${jobLines}\n\n` +
-        `👆 Type /search whenever you're ready\\.\n` +
-        `Cron jobs will fire automatically on schedule\\.`,
-        { parse_mode: "MarkdownV2" }
-      ).catch(() => {});
-    },
-  });
+  const tryStart = async (): Promise<void> => {
+    try {
+      await bot.start({
+        onStart: async (info) => {
+          console.log(`✅ Bot @${info.username} online`);
+          try {
+            const jobs = (await import("./src/jobs.js")).listJobs();
+            const jobLines = jobs
+              .filter((j) => j.enabled)
+              .map((j) => `• ${j.name}: \`${j.schedule}\``)
+              .join("\n");
+            await bot.api.sendMessage(
+              adminChatId,
+              `🟢 *Seeka is online\\!*\n\n` +
+              `⏰ *Auto\\-scheduled searches:*\n${jobLines}\n\n` +
+              `👆 Type /search whenever you're ready\\.\n` +
+              `Cron jobs will fire automatically on schedule\\.`,
+              { parse_mode: "MarkdownV2" }
+            ).catch(() => {});
+          } catch (err) {
+            console.error("[Bot] onStart error:", err);
+          }
+        },
+      });
+    } catch (err: any) {
+      const delay = delays[Math.min(attempt, delays.length - 1)];
+      attempt++;
+      console.error(`[Bot] Polling conflict (${err?.error_code || err?.message || err}) — retry in ${delay / 1000}s (attempt ${attempt})`);
+      await new Promise((r) => setTimeout(r, delay));
+      await tryStart();
+    }
+  };
+
+  return tryStart();
 }
 
 main().catch((err) => {
