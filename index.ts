@@ -3,6 +3,17 @@
 import { config } from "dotenv";
 config();
 
+// ── Catch 409 bot conflicts before they crash the process ────────────────────
+// grammy's polling loop throws internally (not caught by try/catch around start)
+process.on("unhandledRejection", (err: any) => {
+  const is409 = err?.error_code === 409 || (err?.message && err.message.includes("409"));
+  if (is409) {
+    console.log("[Bot] 409 conflict suppressed (deploy handoff) — retrying...");
+    return;
+  }
+  console.error("[Unhandled Rejection]", err);
+});
+
 import { createBot } from "./src/bot.js";
 import { loadJobs, startAllJobs } from "./src/jobs.js";
 import { setupNotionDatabase, initSeenUrls } from "./src/notion.js";
