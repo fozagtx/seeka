@@ -14,7 +14,7 @@ process.on("unhandledRejection", (err: any) => {
   console.error("[Unhandled Rejection]", err);
 });
 
-import { createBot } from "./src/bot.js";
+import { createBot, TELEGRAM_COMMANDS } from "./src/bot.js";
 import { loadJobs, startAllJobs } from "./src/jobs.js";
 import { setupNotionDatabase, initSeenUrls } from "./src/notion.js";
 import { loadHistory as loadDedupeHistory } from "./src/dedupe.js";
@@ -111,6 +111,14 @@ async function main() {
       try { await fetch(`${RENDER_URL}/health`); } catch {}
     }, 10 * 60 * 1000);
     console.log(`💓 Keep-alive pinging every 10 min`);
+  }
+
+  // ── Telegram command menu ─────────────────────────────────────────────────
+  try {
+    await bot.api.setMyCommands(TELEGRAM_COMMANDS);
+    console.log("✅ Telegram slash commands registered");
+  } catch (err) {
+    console.error("[Bot] Failed to register slash commands:", err);
   }
 
   // ── Start bot ─────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@
 import type { SearchResult, Hackathon, Industry } from "./types.js";
 
 const FIRECRAWL_BASE = "https://api.firecrawl.dev/v1";
+const FIRESCRAPER_BASE = "https://firescraper.com/api/v1";
 
 interface FirecrawlResult {
   success: boolean;
@@ -21,66 +22,196 @@ interface FirecrawlResult {
 export async function scrapeHackathonDetails(
   result: SearchResult
 ): Promise<Hackathon | null> {
+  let markdown = "";
+  let metadata: NonNullable<FirecrawlResult["data"]>["metadata"] = {};
+  const twitterUrl = isTwitterUrl(result.url);
+
+  if (twitterUrl) {
+    markdown = await scrapeWithFireScraper(result.url);
+  }
+
+  if (!twitterUrl || markdown.length < 300) {
+    try {
+      const response = await fetch(`${FIRECRAWL_BASE}/scrape`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.FIRECRAWL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: result.url,
+          formats: ["markdown"],
+          onlyMainContent: true,
+          waitFor: 2000,
+          timeout: 20000,
+        }),
+      });
+
+      if (response.ok) {
+        const data: FirecrawlResult = await response.json();
+        if (data.success && data.data) {
+          const firecrawlMarkdown = data.data.markdown || "";
+          markdown = [markdown, firecrawlMarkdown].filter(Boolean).join("\n\n");
+          metadata = data.data.metadata || {};
+        }
+      } else {
+        console.error(`[Firecrawl] HTTP ${response.status} for ${result.url}`);
+      }
+    } catch (err) {
+      console.error(`[Firecrawl] Error scraping ${result.url}:`, err);
+    }
+  }
+
+  if (!twitterUrl && markdown.length < 300) {
+    const fireScraperText = await scrapeWithFireScraper(result.url);
+    if (fireScraperText) {
+      markdown = [markdown, fireScraperText].filter(Boolean).join("\n\n");
+    }
+  }
+
+  if (!markdown && !result.text) {
+    return parseFromSearchResult(result);
+  }
+
+  const combined = markdown + " " + result.text;
+
+  // ── Drop pages that explicitly say the event has ended ──────────────────
+  if (isEventEnded(combined)) {
+    console.log(`[Scraper] Skipping ended event: ${result.url}`);
+    return null;
+  }
+
+  const name = metadata?.ogTitle || metadata?.title || result.title || "Unnamed Opportunity";
+  const description =
+    extractDescription(markdown) ||
+    metadata?.ogDescription ||
+    metadata?.description ||
+    result.text.slice(0, 500) ||
+    "No description found.";
+
+  return {
+    name: cleanText(name),
+    organizer: extractOrganizer(combined),
+    description: cleanText(description),
+    startDate: extractStartDate(combined),
+    deadline: extractDeadline(combined),
+    prizePool: extractPrizePool(combined),
+    format: extractFormat(combined),
+    industry: classifyIndustry(name + " " + description + " " + combined),
+    link: result.url,
+    source: extractSource(result.url),
+    foundAt: new Date().toISOString(),
+    tags: extractTags(name + " " + description + " " + combined),
+  };
+}
+
+async function scrapeWithFireScraper(url: string): Promise<string> {
+  const apiKey = process.env.FIRESCRAPER_API_KEY;
+  if (!apiKey) return "";
+
   try {
-    const response = await fetch(`${FIRECRAWL_BASE}/scrape`, {
+    const sessionRes = await fetch(`${FIRESCRAPER_BASE}/scrape`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.FIRECRAWL_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        url: result.url,
-        formats: ["markdown"],
-        onlyMainContent: true,
-        waitFor: 2000,
-        timeout: 20000,
+        name: `Seeka scrape ${new Date().toISOString()}`,
+        urls: [url],
+        maxDepth: isTwitterUrl(url) ? 1 : 0,
+        minTextLength: isTwitterUrl(url) ? 5 : 50,
+        scraper: isTwitterUrl(url) ? "full" : "article",
+        uniqueTextDownloads: true,
+        respectRobotsTxt: !isTwitterUrl(url),
       }),
     });
 
-    if (!response.ok) {
-      console.error(`[Firecrawl] HTTP ${response.status} for ${result.url}`);
-      return parseFromSearchResult(result);
+    if (!sessionRes.ok) {
+      console.error(`[FireScraper] HTTP ${sessionRes.status} starting ${url}`);
+      return "";
     }
 
-    const data: FirecrawlResult = await response.json();
-    if (!data.success || !data.data) {
-      return parseFromSearchResult(result);
-    }
+    const session = await sessionRes.json() as { id?: string; session?: { id?: string } };
+    const sessionId = session.id || session.session?.id;
+    if (!sessionId) return "";
 
-    const md = data.data.markdown || "";
-    const meta = data.data.metadata || {};
-    const combined = md + " " + result.text;
+    const done = await waitForFireScraperSession(sessionId, apiKey);
+    if (!done) return "";
 
-    // ── Drop pages that explicitly say the event has ended ──────────────────
-    if (isEventEnded(combined)) {
-      console.log(`[Scraper] Skipping ended event: ${result.url}`);
-      return null;
-    }
-
-    const name = meta.ogTitle || meta.title || result.title || "Unnamed Hackathon";
-    const description =
-      extractDescription(md) ||
-      meta.ogDescription ||
-      meta.description ||
-      result.text.slice(0, 500);
-
-    return {
-      name: cleanText(name),
-      organizer: extractOrganizer(combined),
-      description: cleanText(description),
-      startDate: extractStartDate(combined),
-      deadline: extractDeadline(combined),
-      prizePool: extractPrizePool(combined),
-      format: extractFormat(combined),
-      industry: classifyIndustry(name + " " + description),
-      link: result.url,
-      source: extractSource(result.url),
-      foundAt: new Date().toISOString(),
-      tags: extractTags(name + " " + description),
-    };
+    return await getFireScraperResults(sessionId, apiKey);
   } catch (err) {
-    console.error(`[Firecrawl] Error scraping ${result.url}:`, err);
-    return parseFromSearchResult(result);
+    console.error(`[FireScraper] Error scraping ${url}:`, err);
+    return "";
+  }
+}
+
+async function waitForFireScraperSession(sessionId: string, apiKey: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 18; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 1000 : 2500));
+
+    const res = await fetch(`${FIRESCRAPER_BASE}/sessions/${sessionId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) continue;
+
+    const data = await res.json() as {
+      session?: { status?: string; downloadFilesReady?: boolean };
+    };
+    const status = data.session?.status?.toLowerCase();
+    if (data.session?.downloadFilesReady || status === "done" || status === "completed") return true;
+    if (status === "failed" || status === "error") return false;
+  }
+  return false;
+}
+
+async function getFireScraperResults(sessionId: string, apiKey: string): Promise<string> {
+  const jsonRes = await fetch(`${FIRESCRAPER_BASE}/sessions/${sessionId}/results?format=json`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+
+  if (jsonRes.ok) {
+    const contentType = jsonRes.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const payload = await jsonRes.json();
+      const text = extractFireScraperText(payload);
+      if (text) return text;
+    } else {
+      const text = await jsonRes.text();
+      if (text) return text;
+    }
+  }
+
+  const mdRes = await fetch(`${FIRESCRAPER_BASE}/sessions/${sessionId}/results?format=markdown`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  return mdRes.ok ? await mdRes.text() : "";
+}
+
+function extractFireScraperText(payload: unknown): string {
+  if (typeof payload === "string") return payload;
+  if (Array.isArray(payload)) {
+    return payload.map(extractFireScraperText).filter(Boolean).join("\n\n");
+  }
+  if (!payload || typeof payload !== "object") return "";
+
+  const obj = payload as Record<string, unknown>;
+  const direct = [obj.markdown, obj.text, obj.content, obj.title]
+    .filter((value): value is string => typeof value === "string")
+    .join("\n\n");
+  const nested = [obj.data, obj.results, obj.pages, obj.documents]
+    .map(extractFireScraperText)
+    .filter(Boolean)
+    .join("\n\n");
+  return [direct, nested].filter(Boolean).join("\n\n");
+}
+
+function isTwitterUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com");
+  } catch {
+    return false;
   }
 }
 

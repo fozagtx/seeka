@@ -4,6 +4,7 @@
 import { searchHackathons } from "./searcher.js";
 import { scrapeHackathonDetails } from "./scraper.js";
 import { pushToNotion } from "./notion.js";
+import { normalizeUrl, titleFingerprint } from "./dedupe.js";
 import { formatTelegramMessage } from "./types.js";
 import type { Hackathon } from "./types.js";
 
@@ -28,7 +29,7 @@ export async function runSearch(
   const label = customQuery ? `"${customQuery}"` : "full sweep";
   console.log(`[Pipeline] Starting: ${label}`);
 
-  await cb.onStatus(`🔎 *Search started* — ${label}`);
+  await cb.onStatus(`🔎 *Step 1/6: Exa search started* — ${label}`);
 
   // ── Step 1: Exa search (agent + neural + X) ────────────────────────────────
   let rawResults: Awaited<ReturnType<typeof searchHackathons>>;
@@ -52,20 +53,31 @@ export async function runSearch(
     }
   }
 
-  await cb.onStatus(`📡 Found *${results.length}* raw results — filtering & scraping...`);
+  await cb.onStatus(`📡 Exa returned *${results.length}* raw results.`);
 
-  // ── Step 2: Filter to likely hackathon pages ───────────────────────────────
-  const filtered = results.filter((r) => isLikelyHackathon(r.title + " " + r.url + " " + r.text));
-  console.log(`[Pipeline] ${filtered.length}/${results.length} pass hackathon filter`);
+  // ── Step 2: Filter to likely opportunity pages ────────────────────────────
+  const filtered = customQuery
+    ? results
+    : results.filter((r) => isLikelyHackathon(r.title + " " + r.url + " " + r.text));
+  console.log(`[Pipeline] ${filtered.length}/${results.length} selected for scraping`);
 
   if (filtered.length === 0) {
-    await cb.onSummary(`⚠️ Found ${results.length} results but none matched hackathon criteria.`);
+    await cb.onSummary(`⚠️ Found ${results.length} results but none matched opportunity criteria.`);
     return { found: 0, pushed: 0, skipped: 0, failed: 0, hackathons: [] };
   }
 
-  // ── Step 3: Firecrawl scrape ──────────────────────────────────────────────
+  const batch = filtered.slice(0, customQuery ? 30 : 20);
+  const twitterCount = batch.filter((r) => isTwitterUrl(r.url)).length;
+  const webCount = batch.length - twitterCount;
+  await cb.onStatus(
+    `🧭 *Step 2/6: Scrape plan*\n` +
+    `• X/Twitter via FireScraper: *${twitterCount}*\n` +
+    `• Web pages via Firecrawl: *${webCount}*\n` +
+    `• FireScraper fallback enabled for weak web scrapes`
+  ).catch(() => {});
+
+  // ── Step 3: Firecrawl/FireScraper scrape ──────────────────────────────────
   const scraped: Hackathon[] = [];
-  const batch = filtered.slice(0, 20);
   let scrapeErrors = 0;
 
   for (let i = 0; i < batch.length; i++) {
@@ -78,14 +90,15 @@ export async function runSearch(
       console.error(`[Pipeline] Scrape error for ${result.url}:`, err);
     }
     if ((i + 1) % 5 === 0 || i === batch.length - 1) {
-      await cb.onStatus(`📄 Scraped *${i + 1}/${batch.length}*...`).catch(() => {});
+      await cb.onStatus(`📄 *Step 3/6: Scraped ${i + 1}/${batch.length}*...`).catch(() => {});
     }
     await sleep(400);
   }
 
-  // ── Step 4: Filter out expired deadlines ──────────────────────────────────
+  // ── Step 4: Validate active opportunities ─────────────────────────────────
+  await cb.onStatus(`🧪 *Step 4/6: Validating and consolidating results...*`).catch(() => {});
   const now = new Date();
-  const hackathons = scraped.filter((h) => {
+  const active = scraped.filter((h) => {
     if (!h.deadline) return true; // unknown deadline — keep it
     const parsed = parseDeadline(h.deadline);
     if (!parsed) return true;     // can't parse — keep it
@@ -96,27 +109,33 @@ export async function runSearch(
     return true;
   });
 
-  const expired = scraped.length - hackathons.length;
+  const expired = scraped.length - active.length;
+  const { hackathons, duplicateCount } = consolidateHackathons(active);
   if (expired > 0) {
-    await cb.onStatus(`🗑 Filtered out *${expired}* expired event${expired > 1 ? "s" : ""} (deadline passed)`).catch(() => {});
+    await cb.onStatus(`🗑 Removed *${expired}* expired event${expired > 1 ? "s" : ""} before Notion.`).catch(() => {});
+  }
+  if (duplicateCount > 0) {
+    await cb.onStatus(`🧹 Removed *${duplicateCount}* duplicate result${duplicateCount > 1 ? "s" : ""} before Notion.`).catch(() => {});
   }
 
-  console.log(`[Pipeline] ${hackathons.length} active events after deadline filter (${expired} expired, ${scrapeErrors} errors)`);
+  console.log(`[Pipeline] ${hackathons.length} consolidated active events (${expired} expired, ${duplicateCount} duplicates, ${scrapeErrors} scrape errors)`);
 
   if (hackathons.length === 0) {
     await cb.onSummary(`⚠️ Scraping returned no usable results. Try again or use /custom with a specific query.`);
     return { found: 0, pushed: 0, skipped: 0, failed: scrapeErrors, hackathons: [] };
   }
 
-  // ── Step 4: Push to Notion + notify per new entry ─────────────────────────
-  await cb.onStatus(`📋 Sending to Notion...`);
+  // ── Step 5: Push to Notion + notify per new entry ─────────────────────────
+  await cb.onStatus(`📋 *Step 5/6: Promoting clean results to Notion...*`);
   let pushed = 0, skipped = 0, failed = 0;
+  const pushedHackathons: Hackathon[] = [];
 
   for (const h of hackathons) {
     try {
       const id = await pushToNotion(h);
       if (id) {
         pushed++;
+        pushedHackathons.push(h);
         // Send individual formatted Telegram message immediately
         await cb.onNew(h).catch(() => {});
       } else {
@@ -129,28 +148,32 @@ export async function runSearch(
     await sleep(300);
   }
 
-  // ── Step 5: Final summary ──────────────────────────────────────────────────
+  // ── Step 6: Final Telegram summary ────────────────────────────────────────
   const notionUrl = `https://notion.so/${process.env.NOTION_DATABASE_ID?.replace(/-/g, "")}`;
   const summaryLines = [
-    `✅ *Search Complete!*`,
+    `✅ *Step 6/6: Search complete*`,
     ``,
     `📊 *Stats:*`,
-    `• Scanned: ${results.length} pages`,
-    `• Matched: ${filtered.length} hackathon pages`,
-    `• Scraped: ${hackathons.length} events`,
+    `• Exa results: ${results.length}`,
+    `• Selected for scraping: ${filtered.length}`,
+    `• X/Twitter FireScraper targets: ${twitterCount}`,
+    `• Web Firecrawl targets: ${webCount}`,
+    `• Scraped into records: ${scraped.length}`,
+    expired > 0 ? `• Expired removed: ${expired}` : null,
+    duplicateCount > 0 ? `• Duplicates removed before Notion: ${duplicateCount}` : null,
+    `• Consolidated clean records: ${hackathons.length}`,
     `• 🆕 New → Notion: *${pushed}*`,
     `• ⏭ Already tracked: ${skipped}`,
-    failed > 0 ? `• ❌ Errors: ${failed}` : null,
+    failed + scrapeErrors > 0 ? `• ❌ Errors: ${failed + scrapeErrors}` : null,
     ``,
     `🗂 [View in Notion](${notionUrl})`,
   ].filter((l) => l !== null).join("\n");
 
   await cb.onSummary(summaryLines);
 
-  // ── Step 6: Notion snapshot — top 3 new ones ──────────────────────────────
-  if (pushed > 0) {
-    const newOnes = hackathons.filter((_, i) => i < pushed);
-    const snapshot = newOnes
+  // ── Notion snapshot — top 3 new ones ──────────────────────────────────────
+  if (pushedHackathons.length > 0) {
+    const snapshot = pushedHackathons
       .slice(0, 3)
       .map(
         (h, i) =>
@@ -164,19 +187,50 @@ export async function runSearch(
 
     if (snapshot) {
       await cb.onStatus(
-        `📸 *Notion snapshot — latest ${Math.min(pushed, 3)} added:*\n\n${snapshot}`
+        `📸 *Notion snapshot — latest ${Math.min(pushedHackathons.length, 3)} added:*\n\n${snapshot}`
       ).catch(() => {});
     }
   }
 
-  return { found: hackathons.length, pushed, skipped, failed, hackathons };
+  return { found: hackathons.length, pushed, skipped, failed: failed + scrapeErrors, hackathons };
+}
+
+function consolidateHackathons(items: Hackathon[]): { hackathons: Hackathon[]; duplicateCount: number } {
+  const seenUrls = new Set<string>();
+  const seenTitles = new Set<string>();
+  const hackathons: Hackathon[] = [];
+
+  for (const item of items) {
+    const urlKey = normalizeUrl(item.link);
+    const titleKey = titleFingerprint(item.name);
+
+    if (urlKey && seenUrls.has(urlKey)) continue;
+    if (titleKey && seenTitles.has(titleKey)) continue;
+
+    if (urlKey) seenUrls.add(urlKey);
+    if (titleKey) seenTitles.add(titleKey);
+    hackathons.push(item);
+  }
+
+  return { hackathons, duplicateCount: items.length - hackathons.length };
+}
+
+function isTwitterUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com");
+  } catch {
+    return false;
+  }
 }
 
 function isLikelyHackathon(text: string): boolean {
   const t = text.toLowerCase();
   return [
     "hackathon", "competition", "contest", "challenge", "bounty",
+    "grant", "grants", "funding", "award", "fellowship",
     "prize", "submission", "deadline", "apply now", "register",
+    "registration closes", "submissions close", "applications close",
     "devpost", "devfolio", "hackerearth", "mlh", "lablab",
     "hackfest", "buildathon", "sprint", "datathon",
   ].some((k) => t.includes(k));

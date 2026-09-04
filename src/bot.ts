@@ -20,6 +20,20 @@ type ConvState =
 
 const userState = new Map<number, ConvState>();
 
+export const TELEGRAM_COMMANDS = [
+  { command: "start", description: "Show bot overview" },
+  { command: "help", description: "Show commands and cron examples" },
+  { command: "search", description: "Run a full sweep now" },
+  { command: "custom", description: "Search with your own query" },
+  { command: "jobs", description: "List scheduled jobs" },
+  { command: "addjob", description: "Add a scheduled search" },
+  { command: "removejob", description: "Remove a scheduled search" },
+  { command: "togglejob", description: "Pause or resume a job" },
+  { command: "setschedule", description: "Change a job schedule" },
+  { command: "runjob", description: "Run a job now" },
+  { command: "dedupe", description: "Preview or remove Notion duplicates" },
+];
+
 export function createBot(
   adminChatId: string,
   makeCbs?: (label: string) => PipelineCallbacks  // injected from index.ts

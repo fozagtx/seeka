@@ -36,6 +36,7 @@ Fill in `.env`:
 | `TELEGRAM_ADMIN_CHAT_ID` | Message [@userinfobot](https://t.me/userinfobot) |
 | `EXA_API_KEY` | [exa.ai/api](https://exa.ai) |
 | `FIRECRAWL_API_KEY` | [firecrawl.dev](https://firecrawl.dev) |
+| `FIRESCRAPER_API_KEY` | [firescraper.com](https://firescraper.com) fallback scraper, useful for X/Twitter pages |
 | `NOTION_API_KEY` | [notion.so/my-integrations](https://www.notion.so/my-integrations) |
 | `NOTION_DATABASE_ID` | Copy from your Notion database URL |
 
@@ -80,6 +81,7 @@ bun dev             # Dev mode with hot reload
 | `/togglejob` | Pause or resume a cron job |
 | `/setschedule` | Change a job's cron expression |
 | `/runjob` | Manually run a specific job now |
+| `/dedupe` | Preview or remove duplicate Notion pages |
 
 ---
 

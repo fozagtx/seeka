@@ -25,10 +25,13 @@ const NEURAL_QUERIES = [
 ];
 
 // ─── X/Twitter specific ───────────────────────────────────────────────────────
+const X_OPPORTUNITY_QUERY = `(hackathon OR buildathon OR contest OR competition OR challenge OR grant) (deadline OR "submissions close" OR "registration closes") ("Sep 2026" OR "September 2026" OR "Oct 2026" OR "October 2026" OR "Nov 2026" OR "November 2026" OR "Dec 2026" OR "December 2026" OR "2027") -2025 -2024 -ended -closed -expired -past`;
+
 const TWITTER_QUERIES = [
-  "hackathon 2026 registration open",
-  "coding competition 2026 prize apply",
-  "developer contest 2026 deadline",
+  X_OPPORTUNITY_QUERY,
+  "hackathon 2026 registration open deadline prize",
+  "buildathon contest competition challenge 2026 2027 submissions close",
+  "grant fellowship funding award 2026 2027 applications close",
 ];
 
 export interface SearchOutput {
@@ -53,6 +56,10 @@ export async function searchHackathons(
     onStatus(`🔍 Running neural search...`);
     const neural = await runNeuralQuery(customQuery);
     allResults.push(...neural);
+
+    onStatus(`🐦 Scanning X/Twitter with FireScraper-ready targets...`);
+    const twitter = await runTwitterSearches([customQuery, `${customQuery} ${X_OPPORTUNITY_QUERY}`]);
+    allResults.push(...twitter);
   } else {
     // Full sweep — agent mode first
     onStatus(`🤖 *Phase 1/3:* Agent research (deep mode)...`);
@@ -76,12 +83,9 @@ export async function searchHackathons(
     }
 
     // X / Twitter search
-    onStatus(`🐦 *Phase 3/3:* Scanning X/Twitter...`);
-    for (const q of TWITTER_QUERIES) {
-      const results = await runTwitterSearch(q);
-      allResults.push(...results);
-      await sleep(300);
-    }
+    onStatus(`🐦 *Phase 3/3:* Scanning X/Twitter with the opportunity prompt...`);
+    const twitter = await runTwitterSearches(TWITTER_QUERIES);
+    allResults.push(...twitter);
   }
 
   // Deduplicate by URL
@@ -144,38 +148,54 @@ async function runNeuralQuery(query: string, domains?: string[]): Promise<Search
 }
 
 // ─── X/Twitter search ─────────────────────────────────────────────────────────
-async function runTwitterSearch(query: string): Promise<SearchResult[]> {
+async function runTwitterSearches(queries: string[]): Promise<SearchResult[]> {
+  const allResults: SearchResult[] = [];
+
+  for (const query of queries) {
+    allResults.push(...await runSingleTwitterSearch(query, "neural"));
+    allResults.push(...await runSingleTwitterSearch(query, "keyword"));
+    await sleep(300);
+  }
+
+  const seen = new Set<string>();
+  return allResults.filter((result) => {
+    if (!isTwitterUrl(result.url)) return false;
+    if (seen.has(result.url)) return false;
+    seen.add(result.url);
+    return true;
+  });
+}
+
+async function runSingleTwitterSearch(query: string, type: "neural" | "keyword"): Promise<SearchResult[]> {
   try {
-    // Try with X/Twitter domains
-    const res = await exa.searchAndContents(query, {
-      type: "neural",
-      numResults: 8,
-      includeDomains: ["twitter.com", "x.com"],
-      text: { maxCharacters: 800 },
-      startPublishedDate: getDateMonthsAgo(1),
+    const searchQuery = type === "keyword" ? `site:x.com OR site:twitter.com ${query}` : query;
+    const res = await exa.searchAndContents(searchQuery, {
+      type,
+      numResults: type === "neural" ? 12 : 8,
+      includeDomains: ["x.com", "twitter.com"],
+      text: { maxCharacters: 1500 },
+      startPublishedDate: getDateMonthsAgo(2),
     } as any);
+
     return (res.results as any[]).map((item) => ({
       title: item.title || "",
       url: item.url,
       text: item.text || "",
       publishedDate: item.publishedDate || undefined,
+      author: item.author || undefined,
     }));
+  } catch (err) {
+    console.error(`[Exa X/${type}] Error:`, err);
+    return [];
+  }
+}
+
+function isTwitterUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "x.com" || host.endsWith(".x.com") || host === "twitter.com" || host.endsWith(".twitter.com");
   } catch {
-    // Fallback — keyword search mentioning Twitter
-    try {
-      const res = await exa.searchAndContents(`site:twitter.com OR site:x.com ${query}`, {
-        type: "keyword",
-        numResults: 5,
-        text: { maxCharacters: 800 },
-      } as any);
-      return (res.results as any[]).map((item) => ({
-        title: item.title || "",
-        url: item.url,
-        text: item.text || "",
-      }));
-    } catch {
-      return [];
-    }
+    return false;
   }
 }
 
