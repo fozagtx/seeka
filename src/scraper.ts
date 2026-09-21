@@ -15,6 +15,8 @@ interface FirecrawlResult {
       description?: string;
       ogDescription?: string;
       ogTitle?: string;
+      ogImage?: string | string[];
+      "og:image"?: string | string[];
     };
   };
 }
@@ -81,12 +83,13 @@ export async function scrapeHackathonDetails(
     return null;
   }
 
-  const name = metadata?.ogTitle || metadata?.title || result.title || "Unnamed Opportunity";
+  const pageTitle = [metadata?.ogTitle, metadata?.title].find((t) => t && !isGenericTitle(t));
+  const name = pageTitle || result.title || "Unnamed Opportunity";
   const description =
     extractDescription(markdown) ||
     metadata?.ogDescription ||
     metadata?.description ||
-    result.text.slice(0, 500) ||
+    (result.origin === "x" ? result.text : result.text.slice(0, 500)) ||
     "No description found.";
 
   return {
@@ -99,10 +102,29 @@ export async function scrapeHackathonDetails(
     format: extractFormat(combined),
     industry: classifyIndustry(name + " " + description + " " + combined),
     link: result.url,
-    source: extractSource(result.url),
+    source: extractSource(result.origin === "x" ? result.sourceUrl ?? result.url : result.url),
     foundAt: new Date().toISOString(),
     tags: extractTags(name + " " + description + " " + combined),
+    imageUrl: result.imageUrl || firstImageUrl(metadata?.ogImage ?? metadata?.["og:image"]) || null,
+    sourceUrl: result.sourceUrl,
   };
+}
+
+function firstImageUrl(value: string | string[] | undefined): string | null {
+  const url = Array.isArray(value) ? value[0] : value;
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  return url;
+}
+
+// Titles from login walls, bot checks, or bare site names carry no information
+function isGenericTitle(title: string): boolean {
+  const t = title.trim().toLowerCase();
+  if (t.length < 4) return true;
+  return [
+    /^x$/, /^x\.com$/, /^twitter$/, /^home$/, /^untitled/, /^404/, /^page not found/,
+    /^log ?in/, /^sign ?(in|up)/, /^just a moment/, /^attention required/, /^access denied/,
+    /^error/, /^(x|twitter)\b.*\/ x$/, /^\w+ on x:/, /^\w+ on twitter:/,
+  ].some((p) => p.test(t));
 }
 
 async function scrapeWithFireScraper(url: string): Promise<string> {
@@ -231,30 +253,62 @@ function parseFromSearchResult(result: SearchResult): Hackathon | null {
     format: extractFormat(combined),
     industry: classifyIndustry(combined),
     link: result.url,
-    source: extractSource(result.url),
+    source: extractSource(result.origin === "x" ? result.sourceUrl ?? result.url : result.url),
     foundAt: new Date().toISOString(),
     tags: extractTags(combined),
+    imageUrl: result.imageUrl || null,
+    sourceUrl: result.sourceUrl,
   };
 }
 
 // ─── Extraction helpers ───────────────────────────────────────────────────────
 
+const BOILERPLATE = /(cookie|privacy policy|terms of (service|use)|javascript|log ?in|sign ?(in|up)|subscribe to|newsletter|all rights reserved|skip to (main )?content|enable javascript|accept all|we use cookies)/i;
+
 function extractDescription(md: string): string {
-  const paragraphs = md.split("\n\n").filter((p) => p.trim().length > 50);
+  const paragraphs = md
+    .split(/\n\s*\n/)
+    .map(stripMarkdown)
+    .filter((p) => p.length > 50)
+    .filter((p) => !BOILERPLATE.test(p))
+    .filter((p) => (p.match(/[a-z]/gi) ?? []).length / p.length > 0.6) // mostly prose, not tables/menus
+    .filter((p) => p.split(/\s+/).length >= 8);
   return paragraphs[0]?.slice(0, 800) || "";
+}
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")        // images
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")     // links → label
+    .replace(/^#{1,6}\s+/gm, "")                 // headings
+    .replace(/^\s*\|.*\|\s*$/gm, "")             // table rows
+    .replace(/[*_~`>]/g, "")                     // emphasis, quotes
+    .replace(/^\s*[-+*]\s+/gm, "")               // bullets
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function extractOrganizer(text: string): string | null {
   const patterns = [
-    /(?:organized by|organizer|hosted by|presented by|sponsor)[:\s]+([^\n,\.]{3,80})/i,
-    /(?:by|from)\s+([A-Z][A-Za-z\s&,]+(?:Inc|LLC|Labs|Foundation|Community|Network)?)/,
-    /(?:partner|partnered with)[:\s]+([^\n,\.]{3,60})/i,
+    /(?:organi[sz]ed by|organi[sz]er|hosted by|presented by|brought to you by)[:\s]+([^\n,\.|]{3,80})/i,
+    /(?:in partnership with|partnered with|powered by)[:\s]+([^\n,\.|]{3,60})/i,
   ];
   for (const p of patterns) {
     const m = text.match(p);
-    if (m) return m[1].trim().slice(0, 100);
+    if (!m) continue;
+    const candidate = stripMarkdown(m[1]).replace(/\s+(and|with|for|to|at|on)\s.*$/i, "").trim();
+    if (isPlausibleOrganizer(candidate)) return candidate.slice(0, 100);
   }
   return null;
+}
+
+function isPlausibleOrganizer(s: string): boolean {
+  if (s.length < 2 || s.length > 80) return false;
+  if (/https?:|www\.|@/.test(s)) return false;
+  if (s.split(/\s+/).length > 6) return false;
+  if (!/[A-Za-z]/.test(s)) return false;
+  if (BOILERPLATE.test(s)) return false;
+  return true;
 }
 
 function extractDeadline(text: string): string | null {
@@ -284,20 +338,24 @@ function extractStartDate(text: string): string | null {
   return null;
 }
 
+const CURRENCY = `(?:\\$|USD\\s?|US\\$|€|EUR\\s?|£|GBP\\s?|₹|INR\\s?)`;
+const AMOUNT = `(\\d{1,3}(?:,\\d{3})+|\\d+(?:\\.\\d+)?\\s?[kKmM]\\b|\\d{3,})`;
+
 function extractPrizePool(text: string): string | null {
   const patterns = [
-    /(?:prize[s]?|pool|reward|win|award)[:\s]*\$?([\d,]+(?:\.\d+)?[kKmM]?)/i,
-    /\$([\d,]+(?:\.\d+)?[kKmM]?)\s*(?:prize|award|reward|pool|total)/i,
-    /(?:total prize)[:\s]*\$?([\d,]+(?:\.\d+)?[kKmM]?)/i,
-    /prize[:\s]+([^\n]{3,80})/i,
+    new RegExp(`(?:total\\s+)?(?:prize\\s*pool|prizes?|rewards?|bounty|bounties|grants?)[^\\n\\d$€£₹]{0,40}(${CURRENCY})\\s?${AMOUNT}`, "i"),
+    new RegExp(`(${CURRENCY})\\s?${AMOUNT}(?:\\+|\\s+in|\\s+worth|\\s+of)?\\s+(?:prize|award|reward|pool|total|bounties|grants)`, "i"),
+    new RegExp(`${AMOUNT}\\s?(USDC|USDT|ETH|SOL|BTC)\\s+(?:in\\s+)?(?:prize|reward|bount|pool)`, "i"),
   ];
   for (const p of patterns) {
     const m = text.match(p);
-    if (m) {
-      const val = m[1].trim();
-      if (val.match(/^\d/)) return `$${val}`;
-      return val;
-    }
+    if (!m) continue;
+    const [, a, b] = m;
+    // pattern 3 puts the amount first, token second
+    if (/^(USDC|USDT|ETH|SOL|BTC)$/i.test(b)) return `${a} ${b.toUpperCase()}`;
+    const symbol = a.trim().toUpperCase().replace(/^US\$$/, "$");
+    const amount = b.replace(/\s+/g, "").toUpperCase();
+    return /^[A-Z]+$/.test(symbol) ? `${symbol} ${amount}` : `${symbol}${amount}`;
   }
   return null;
 }
@@ -353,9 +411,9 @@ function extractSource(url: string): string {
 }
 
 function cleanText(text: string): string {
-  return text
-    .replace(/\s+/g, " ")
+  return stripMarkdown(text)
     .replace(/[^\x20-\x7E\n]/g, "")
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 1000);
 }

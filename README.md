@@ -4,7 +4,7 @@
 
 ## What it does
 
-1. **Searches** — Uses [Exa](https://exa.ai) to scan the web, X/Twitter, and major hackathon platforms (Devpost, HackerEarth, Devfolio, MLH, Lablab, etc.)
+1. **Searches** — Uses [Exa](https://exa.ai) to scan the web and major hackathon platforms (Devpost, HackerEarth, Devfolio, MLH, Lablab, etc.), plus the **X API** (`GET /2/tweets/search/recent`) as a discovery source. Every sweep only pulls posts newer than the last run (`since_id` cursor in `data/x-cursor.json`), follows the links in each post to the real event page, and keeps the post's attached image
 2. **Scrapes details** — Uses [Firecrawl](https://firecrawl.dev) to extract full details: name, description, start date, deadline, prize pool
 3. **Classifies by industry** — AI/ML, Web3, FinTech, HealthTech, Climate, Gaming, Cybersecurity, EdTech, etc.
 4. **Pushes to Notion** — Creates structured, rich pages in your Notion database with deduplication
@@ -35,6 +35,7 @@ Fill in `.env`:
 | `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) on Telegram |
 | `TELEGRAM_ADMIN_CHAT_ID` | Message [@userinfobot](https://t.me/userinfobot) |
 | `EXA_API_KEY` | [exa.ai/api](https://exa.ai) |
+| `X_BEARER_TOKEN` | [developer.x.com](https://developer.x.com) app Bearer Token — enables the X API recent-search phase (posts from the last 7 days, with attached images). Optional; the sweep still runs without it |
 | `FIRECRAWL_API_KEY` | [firecrawl.dev](https://firecrawl.dev) |
 | `FIRESCRAPER_API_KEY` | [firescraper.com](https://firescraper.com) fallback scraper, useful for X/Twitter pages |
 | `NOTION_API_KEY` | [notion.so/my-integrations](https://www.notion.so/my-integrations) |
@@ -59,6 +60,8 @@ Required database properties (auto-created if missing):
 - `Status` (select)
 - `Link` (URL)
 - `Tags` (multi-select)
+- `Image` (files) — event image (X post media or page `og:image`), also set as the page cover
+- `Source URL` (URL) — the X post the event was discovered from
 
 ### 4. Run
 
@@ -93,7 +96,7 @@ bun dev             # Dev mode with hot reload
 | Daily AI/ML | `0 10 * * *` (10 AM daily) | AI/ML hackathons |
 | Daily Web3 | `0 14 * * *` (2 PM daily) | Blockchain/Web3 hackathons |
 
-Tap **/start** in Telegram to run the first sweep. After that it runs every 4 hours automatically. Each **new** hackathon is sent to Telegram as its own message (name, organizer, prize, deadline, category, apply link) and written to Notion. All jobs are configurable via Telegram — no code changes needed.
+Tap **/start** in Telegram to run the first sweep. After that it runs every 4 hours automatically. Each **new** hackathon is sent to Telegram as its own message — as a photo with caption when an image is available (name, organizer, prize, deadline, category, apply link) and written to Notion. All jobs are configurable via Telegram — no code changes needed.
 
 ---
 
@@ -115,7 +118,9 @@ seeka/
 ├── index.ts          # Entry point
 ├── src/
 │   ├── bot.ts        # Telegram bot + commands
-│   ├── searcher.ts   # Exa search (web + X/Twitter)
+│   ├── searcher.ts   # Exa search (web + X/Twitter) + orchestrates X API phase
+│   ├── xsearch.ts    # X API v2 recent search (since_id cursor, media, expanded links)
+│   ├── telegram.ts   # Sends hackathons as photo/caption or text
 │   ├── scraper.ts    # Firecrawl detail extraction
 │   ├── notion.ts     # Notion push + deduplication
 │   ├── pipeline.ts   # Orchestration
