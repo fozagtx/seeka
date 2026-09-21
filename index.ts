@@ -19,7 +19,7 @@ import { loadJobs, startAllJobs } from "./src/jobs.js";
 import { setupNotionDatabase, initSeenUrls } from "./src/notion.js";
 import { loadHistory as loadDedupeHistory } from "./src/dedupe.js";
 import { runSearch } from "./src/pipeline.js";
-import { formatTelegramMessage } from "./src/types.js";
+import { sendHackathon } from "./src/telegram.js";
 import type { Hackathon, PipelineCallbacks } from "./src/types.js";
 
 const PORT = Number(process.env.PORT || 3000);
@@ -37,6 +37,9 @@ async function main() {
   if (missing.length > 0) {
     console.error(`❌ Missing env vars: ${missing.join(", ")}`);
     process.exit(1);
+  }
+  if (!process.env.X_BEARER_TOKEN) {
+    console.warn("⚠️  X_BEARER_TOKEN not set — X API search phase will be skipped");
   }
 
   // ── Notion setup ──────────────────────────────────────────────────────────
@@ -59,10 +62,7 @@ async function main() {
     },
     onNew: async (h: Hackathon) => {
       try {
-        await bot.api.sendMessage(ADMIN_CHAT_ID, formatTelegramMessage(h), {
-          parse_mode: "Markdown",
-          link_preview_options: { is_disabled: true },
-        });
+        await sendHackathon(bot.api, ADMIN_CHAT_ID, h);
       } catch (err) { console.error("[CB] onNew:", err); }
     },
     onSummary: async (msg: string) => {

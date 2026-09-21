@@ -3,6 +3,7 @@
 
 import Exa from "exa-js";
 import type { SearchResult } from "./types.js";
+import { searchX, isXConfigured, X_SWEEP_QUERIES } from "./xsearch.js";
 
 const exa = new Exa(process.env.EXA_API_KEY!);
 
@@ -60,9 +61,15 @@ export async function searchHackathons(
     onStatus(`🐦 Scanning X/Twitter with FireScraper-ready targets...`);
     const twitter = await runTwitterSearches([customQuery, `${customQuery} ${X_OPPORTUNITY_QUERY}`]);
     allResults.push(...twitter);
+
+    if (isXConfigured()) {
+      onStatus(`🐦 Querying the X API for: _${customQuery}_`);
+      const xResults = await searchX([buildCustomXQuery(customQuery)], onStatus);
+      allResults.push(...xResults);
+    }
   } else {
     // Full sweep — agent mode first
-    onStatus(`🤖 *Phase 1/3:* Agent research (deep mode)...`);
+    onStatus(`🤖 *Phase 1/4:* Agent research (deep mode)...`);
     for (const q of AGENT_QUERIES.slice(0, 2)) {
       const agentResult = await runAgentQuery(q);
       if (agentResult.summary) agentSummaries.push(agentResult.summary);
@@ -71,7 +78,7 @@ export async function searchHackathons(
     }
 
     // Neural search across hackathon platforms
-    onStatus(`🔍 *Phase 2/3:* Neural search across platforms...`);
+    onStatus(`🔍 *Phase 2/4:* Neural search across platforms...`);
     for (const q of NEURAL_QUERIES.slice(0, 4)) {
       const results = await runNeuralQuery(q, [
         "devpost.com", "hackerearth.com", "devfolio.co", "mlh.io",
@@ -83,20 +90,41 @@ export async function searchHackathons(
     }
 
     // X / Twitter search
-    onStatus(`🐦 *Phase 3/3:* Scanning X/Twitter with the opportunity prompt...`);
+    onStatus(`🐦 *Phase 3/4:* Scanning X/Twitter via Exa...`);
     const twitter = await runTwitterSearches(TWITTER_QUERIES);
     allResults.push(...twitter);
+
+    // X API recent search (since_id cursor — only posts newer than last run)
+    if (isXConfigured()) {
+      onStatus(`🐦 *Phase 4/4:* X API recent search (new posts since last run)...`);
+      const xResults = await searchX(X_SWEEP_QUERIES, onStatus);
+      allResults.push(...xResults);
+    } else {
+      onStatus(`ℹ️ X API skipped — set X\\_BEARER\\_TOKEN to enable.`);
+    }
   }
 
-  // Deduplicate by URL
-  const seen = new Set<string>();
-  const deduped = allResults.filter((r) => {
-    if (seen.has(r.url)) return false;
-    seen.add(r.url);
-    return true;
-  });
+  // Deduplicate by URL — X API results win because they carry images + post links
+  const byUrl = new Map<string, SearchResult>();
+  for (const r of allResults) {
+    const existing = byUrl.get(r.url);
+    if (!existing) { byUrl.set(r.url, r); continue; }
+    if (r.origin === "x" && existing.origin !== "x") byUrl.set(r.url, r);
+  }
+  const deduped = Array.from(byUrl.values());
 
   return { results: deduped, agentSummaries };
+}
+
+function buildCustomXQuery(customQuery: string): string {
+  // Reduce a free-text query to its keywords so it stays a valid X operator query
+  const keywords = customQuery
+    .replace(/[^\w\s$#]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+    .slice(0, 8);
+  const core = keywords.length > 0 ? keywords.join(" ") : "hackathon";
+  return `${core} (hackathon OR competition OR contest OR challenge) has:links -is:retweet lang:en`;
 }
 
 // ─── Exa Agent Mode (answer API) ─────────────────────────────────────────────

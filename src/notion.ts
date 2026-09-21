@@ -71,6 +71,7 @@ export async function pushToNotion(hackathon: Hackathon): Promise<string | null>
     const page = await notion.pages.create({
       parent: { database_id: DB_ID },
       icon: { type: "emoji", emoji: getIndustryEmoji(hackathon.industry) } as any,
+      ...(hackathon.imageUrl ? { cover: { type: "external", external: { url: hackathon.imageUrl } } } : {}),
       properties: buildProperties(hackathon),
       children: buildPageContent(hackathon),
     } as any);
@@ -106,6 +107,8 @@ function buildProperties(h: Hackathon): Record<string, any> {
   if (h.startDate) props["Start Date"] = { rich_text: [{ type: "text", text: { content: h.startDate.slice(0, 200) } }] };
   if (h.format) props["Format"] = { select: { name: h.format } };
   if (h.tags.length > 0) props["Tags"] = { multi_select: h.tags.map((t) => ({ name: t })) };
+  if (h.imageUrl) props["Image"] = { files: [{ type: "external", name: "cover", external: { url: h.imageUrl } }] };
+  if (h.sourceUrl && h.sourceUrl !== h.link) props["Source URL"] = { url: h.sourceUrl };
 
   return props;
 }
@@ -118,10 +121,13 @@ function buildPageContent(h: Hackathon): any[] {
     h.deadline ? `⏰ Deadline: ${h.deadline}` : null,
     h.startDate ? `📅 Start Date: ${h.startDate}` : null,
     `🏷 Category: ${h.industry}${h.format ? ` | ${h.format}` : ""}`,
-    `🔗 Source: ${h.source}`,
+    `🔗 Source: ${h.source}${h.sourceUrl && h.sourceUrl !== h.link ? ` (${h.sourceUrl})` : ""}`,
   ].filter(Boolean).join("\n");
 
   return [
+    ...(h.imageUrl
+      ? [{ type: "image", image: { type: "external", external: { url: h.imageUrl } } }]
+      : []),
     {
       type: "callout",
       callout: {
@@ -176,7 +182,7 @@ export async function setupNotionDatabase(): Promise<void> {
     const db = (await notion.databases.retrieve({ database_id: DB_ID })) as any;
     const props = db.properties ?? {};
     const required = ["Name", "Organizer", "Industry", "Format", "Source", "Found At",
-      "Status", "Link", "Prize Pool", "Deadline", "Start Date", "Tags"];
+      "Status", "Link", "Prize Pool", "Deadline", "Start Date", "Tags", "Image", "Source URL"];
     const missing = required.filter((p) => !props[p]);
     if (missing.length > 0) {
       console.warn(`[Notion] Creating missing properties: ${missing.join(", ")}`);
@@ -211,6 +217,8 @@ async function createMissingProperties(missing: string[]): Promise<void> {
     Deadline: { rich_text: {} },
     "Start Date": { rich_text: {} },
     Tags: { multi_select: {} },
+    Image: { files: {} },
+    "Source URL": { url: {} },
   };
   const updates: Record<string, any> = {};
   for (const prop of missing) {

@@ -2,7 +2,8 @@
 
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { runSearch } from "./pipeline.js";
-import { formatTelegramMessage, type PipelineCallbacks } from "./types.js";
+import type { PipelineCallbacks } from "./types.js";
+import { sendHackathon } from "./telegram.js";
 import type { Hackathon } from "./types.js";
 import {
   listJobs, addJob, removeJob, toggleJob,
@@ -48,7 +49,7 @@ export function createBot(
       try { await bot.api.sendMessage(adminChatId, msg, { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }); } catch {}
     },
     onNew: async (h: Hackathon) => {
-      try { await bot.api.sendMessage(adminChatId, formatTelegramMessage(h), { parse_mode: "Markdown", link_preview_options: { is_disabled: true } }); } catch {}
+      try { await sendHackathon(bot.api, adminChatId, h); } catch {}
     },
     onSummary: async (msg) => {
       const prefix = label ? `🔄 *[${label}]*\n` : "";

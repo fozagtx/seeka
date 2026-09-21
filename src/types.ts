@@ -14,6 +14,8 @@ export interface Hackathon {
   source: string;
   foundAt: string; // ISO timestamp
   tags: string[];
+  imageUrl: string | null;
+  sourceUrl?: string; // where it was discovered (e.g. the X post) when different from link
 }
 
 export type Industry =
@@ -66,6 +68,9 @@ export interface SearchResult {
   text: string;
   publishedDate?: string;
   author?: string;
+  imageUrl?: string;
+  sourceUrl?: string; // original discovery URL (X post) when url points to the linked page
+  origin?: "exa" | "x";
 }
 
 export interface PipelineCallbacks {
@@ -74,7 +79,9 @@ export interface PipelineCallbacks {
   onSummary: (msg: string) => Promise<void>;
 }
 
-export function formatTelegramMessage(h: Hackathon): string {
+export const TELEGRAM_CAPTION_LIMIT = 1024;
+
+export function formatTelegramMessage(h: Hackathon, descriptionLimit = 600): string {
   const category = [h.industry.split(" /")[0], h.format]
     .filter(Boolean)
     .join(" | ");
@@ -86,12 +93,22 @@ export function formatTelegramMessage(h: Hackathon): string {
     (h.prizePool ? `Prize Pool: ${escMd(h.prizePool)}\n` : "") +
     (h.deadline ? `Deadline: ${escMd(h.deadline)}\n` : "") +
     `Category: ${escMd(category)}\n` +
-    `\n${escMd(h.description.slice(0, 600))}\n` +
-    `\n*Apply →*\n${h.link}`
+    (h.description ? `\n${escMd(h.description.slice(0, descriptionLimit))}\n` : "") +
+    `\n*Apply →*\n${h.link}` +
+    (h.sourceUrl && h.sourceUrl !== h.link ? `\n\n_Found on X:_ ${h.sourceUrl}` : "")
   );
 }
 
-function escMd(text: string): string {
+// Shorter variant that fits Telegram's photo caption limit
+export function formatTelegramCaption(h: Hackathon): string {
+  for (const limit of [400, 250, 120, 0]) {
+    const caption = formatTelegramMessage(h, limit);
+    if (caption.length <= TELEGRAM_CAPTION_LIMIT) return caption;
+  }
+  return formatTelegramMessage(h, 0).slice(0, TELEGRAM_CAPTION_LIMIT);
+}
+
+export function escMd(text: string): string {
   // Telegram parse_mode "Markdown" (legacy) only needs these four escaped
   return text.replace(/[_*`\[]/g, "\\$&");
 }

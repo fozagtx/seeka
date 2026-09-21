@@ -53,12 +53,17 @@ export async function runSearch(
     }
   }
 
-  await cb.onStatus(`📡 Exa returned *${results.length}* raw results.`);
+  const xCount = results.filter((r) => r.origin === "x").length;
+  const withImages = results.filter((r) => r.imageUrl).length;
+  await cb.onStatus(
+    `📡 Search returned *${results.length}* raw results` +
+    (xCount > 0 ? ` (${xCount} from the X API, ${withImages} with images)` : "") + `.`
+  );
 
   // ── Step 2: Filter to likely opportunity pages ────────────────────────────
   const filtered = customQuery
     ? results
-    : results.filter((r) => isLikelyHackathon(r.title + " " + r.url + " " + r.text));
+    : results.filter((r) => r.origin === "x" || isLikelyHackathon(r.title + " " + r.url + " " + r.text));
   console.log(`[Pipeline] ${filtered.length}/${results.length} selected for scraping`);
 
   if (filtered.length === 0) {
@@ -66,7 +71,9 @@ export async function runSearch(
     return { found: 0, pushed: 0, skipped: 0, failed: 0, hackathons: [] };
   }
 
-  const batch = filtered.slice(0, customQuery ? 30 : 20);
+  // X API hits are already keyword-filtered and fresh, so let them through first
+  const prioritized = [...filtered.filter((r) => r.origin === "x"), ...filtered.filter((r) => r.origin !== "x")];
+  const batch = prioritized.slice(0, 30);
   const twitterCount = batch.filter((r) => isTwitterUrl(r.url)).length;
   const webCount = batch.length - twitterCount;
   await cb.onStatus(
@@ -154,7 +161,8 @@ export async function runSearch(
     `✅ *Step 6/6: Search complete*`,
     ``,
     `📊 *Stats:*`,
-    `• Exa results: ${results.length}`,
+    `• Search results: ${results.length}${xCount > 0 ? ` (X API: ${xCount})` : ""}`,
+    `• With images: ${hackathons.filter((h) => h.imageUrl).length}`,
     `• Selected for scraping: ${filtered.length}`,
     `• X/Twitter FireScraper targets: ${twitterCount}`,
     `• Web Firecrawl targets: ${webCount}`,

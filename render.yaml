@@ -12,6 +12,8 @@ services:
         sync: false
       - key: EXA_API_KEY
         sync: false
+      - key: X_BEARER_TOKEN
+        sync: false
       - key: FIRECRAWL_API_KEY
         sync: false
       - key: FIRESCRAPER_API_KEY
