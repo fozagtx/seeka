@@ -28,6 +28,11 @@ export async function scrapeHackathonDetails(
   let metadata: NonNullable<FirecrawlResult["data"]>["metadata"] = {};
   const twitterUrl = isTwitterUrl(result.url);
 
+  // X API posts already carry their full text + media; x.com itself is a login wall
+  if (twitterUrl && result.origin === "x") {
+    return parseFromSearchResult(result);
+  }
+
   if (twitterUrl) {
     markdown = await scrapeWithFireScraper(result.url);
   }
