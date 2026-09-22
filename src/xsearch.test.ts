@@ -67,6 +67,32 @@ test("requests media expansions and persists since_id for the next run", async (
   expect(new URL(lastUrl).searchParams.get("since_id")).toBe("2");
 });
 
+test("surfaces API errors in the status line and stops on rate limit", async () => {
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ title: "Too Many Requests" }), { status: 429 })) as unknown as typeof fetch;
+  const statuses: string[] = [];
+  const results = await searchX(["q1", "q2", "q3"], (m) => statuses.push(m));
+  expect(results).toEqual([]);
+  expect(statuses.join("\n")).toContain("429 rate limited");
+  expect(statuses.join("\n")).toContain("skipped 2 remaining");
+});
+
+test("retries without since_id when the stored cursor is rejected", async () => {
+  await searchX(["stale-cursor-query has:links"]);
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    calls.push(url);
+    if (new URL(url).searchParams.has("since_id")) {
+      return new Response(JSON.stringify({ errors: [{ message: "since_id too old" }] }), { status: 400 });
+    }
+    return new Response(JSON.stringify(sample), { headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
+  const results = await searchX(["stale-cursor-query has:links"]);
+  expect(calls.length).toBe(2);
+  expect(results.length).toBeGreaterThan(0);
+});
+
 test("returns nothing when X is not configured", async () => {
   delete process.env.X_BEARER_TOKEN;
   expect(await searchX(["hackathon"])).toEqual([]);

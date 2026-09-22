@@ -74,10 +74,12 @@ export async function runSearch(
   // X API hits are already keyword-filtered and fresh, so let them through first
   const prioritized = [...filtered.filter((r) => r.origin === "x"), ...filtered.filter((r) => r.origin !== "x")];
   const batch = prioritized.slice(0, 30);
-  const twitterCount = batch.filter((r) => isTwitterUrl(r.url)).length;
+  const xApiCount = batch.filter((r) => r.origin === "x").length;
+  const twitterCount = batch.filter((r) => isTwitterUrl(r.url) && r.origin !== "x").length;
   const webCount = batch.length - twitterCount;
   await cb.onStatus(
     `🧭 *Step 2/6: Scrape plan*\n` +
+    `• From the X API (posts + linked pages): *${xApiCount}*\n` +
     `• X/Twitter via FireScraper: *${twitterCount}*\n` +
     `• Web pages via Firecrawl: *${webCount}*\n` +
     `• FireScraper fallback enabled for weak web scrapes`
@@ -164,6 +166,7 @@ export async function runSearch(
     `• Search results: ${results.length}${xCount > 0 ? ` (X API: ${xCount})` : ""}`,
     `• With images: ${hackathons.filter((h) => h.imageUrl).length}`,
     `• Selected for scraping: ${filtered.length}`,
+    `• X API targets: ${xApiCount}`,
     `• X/Twitter FireScraper targets: ${twitterCount}`,
     `• Web Firecrawl targets: ${webCount}`,
     `• Scraped into records: ${scraped.length}`,

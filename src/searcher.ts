@@ -58,18 +58,18 @@ export async function searchHackathons(
     const neural = await runNeuralQuery(customQuery);
     allResults.push(...neural);
 
-    onStatus(`🐦 Scanning X/Twitter with FireScraper-ready targets...`);
-    const twitter = await runTwitterSearches([customQuery, `${customQuery} ${X_OPPORTUNITY_QUERY}`]);
-    allResults.push(...twitter);
-
     if (isXConfigured()) {
       onStatus(`🐦 Querying the X API for: _${customQuery}_`);
       const xResults = await searchX([buildCustomXQuery(customQuery)], onStatus);
       allResults.push(...xResults);
+    } else {
+      onStatus(`🐦 Scanning X/Twitter via Exa (set X\\_BEARER\\_TOKEN for the X API)...`);
+      const twitter = await runTwitterSearches([customQuery, `${customQuery} ${X_OPPORTUNITY_QUERY}`]);
+      allResults.push(...twitter);
     }
   } else {
     // Full sweep — agent mode first
-    onStatus(`🤖 *Phase 1/4:* Agent research (deep mode)...`);
+    onStatus(`🤖 *Phase 1/3:* Agent research (deep mode)...`);
     for (const q of AGENT_QUERIES.slice(0, 2)) {
       const agentResult = await runAgentQuery(q);
       if (agentResult.summary) agentSummaries.push(agentResult.summary);
@@ -78,7 +78,7 @@ export async function searchHackathons(
     }
 
     // Neural search across hackathon platforms
-    onStatus(`🔍 *Phase 2/4:* Neural search across platforms...`);
+    onStatus(`🔍 *Phase 2/3:* Neural search across platforms...`);
     for (const q of NEURAL_QUERIES.slice(0, 4)) {
       const results = await runNeuralQuery(q, [
         "devpost.com", "hackerearth.com", "devfolio.co", "mlh.io",
@@ -89,18 +89,16 @@ export async function searchHackathons(
       await sleep(300);
     }
 
-    // X / Twitter search
-    onStatus(`🐦 *Phase 3/4:* Scanning X/Twitter via Exa...`);
-    const twitter = await runTwitterSearches(TWITTER_QUERIES);
-    allResults.push(...twitter);
-
-    // X API recent search (since_id cursor — only posts newer than last run)
+    // X / Twitter: the X API is the primary source; Exa's x.com index is only a
+    // fallback when no token is set (those pages rarely scrape cleanly).
     if (isXConfigured()) {
-      onStatus(`🐦 *Phase 4/4:* X API recent search (new posts since last run)...`);
+      onStatus(`🐦 *Phase 3/3:* X API recent search (new posts since last run)...`);
       const xResults = await searchX(X_SWEEP_QUERIES, onStatus);
       allResults.push(...xResults);
     } else {
-      onStatus(`ℹ️ X API skipped — set X\\_BEARER\\_TOKEN to enable.`);
+      onStatus(`🐦 *Phase 3/3:* Scanning X/Twitter via Exa (set X\\_BEARER\\_TOKEN for the X API)...`);
+      const twitter = await runTwitterSearches(TWITTER_QUERIES);
+      allResults.push(...twitter);
     }
   }
 

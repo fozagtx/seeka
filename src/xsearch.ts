@@ -57,6 +57,22 @@ export function isXConfigured(): boolean {
   return Boolean(process.env.X_BEARER_TOKEN);
 }
 
+class XApiError extends Error {
+  constructor(public status: number, body: string) {
+    super(`X API ${status}: ${body.slice(0, 300)}`);
+  }
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof XApiError) {
+    if (err.status === 401) return "401 unauthorized — X\\_BEARER\\_TOKEN is invalid";
+    if (err.status === 403) return "403 forbidden — this X app/tier cannot use recent search";
+    if (err.status === 429) return "429 rate limited — X tier quota exhausted, retry next run";
+    return err.message.replace(/_/g, "\\_");
+  }
+  return String(err).slice(0, 200).replace(/_/g, "\\_");
+}
+
 export async function searchX(
   queries: string[],
   onStatus?: (msg: string) => void
@@ -67,11 +83,26 @@ export async function searchX(
   const results: SearchResult[] = [];
   let posts = 0;
 
-  for (const query of queries) {
+  const errors: string[] = [];
+
+  for (let i = 0; i < queries.length; i++) {
+    const query = queries[i];
     const key = cursorKey(query);
     const sinceId = cursors[key]?.sinceId;
     try {
-      const res = await fetchRecent(query, sinceId);
+      let res: XSearchResponse;
+      try {
+        res = await fetchRecent(query, sinceId);
+      } catch (err) {
+        // since_id older than the 7-day window is rejected with 400 — drop the cursor and retry
+        if (err instanceof XApiError && err.status === 400 && sinceId) {
+          console.warn(`[X] since_id ${sinceId} rejected, retrying without cursor`);
+          delete cursors[key];
+          res = await fetchRecent(query, undefined);
+        } else {
+          throw err;
+        }
+      }
       const batch = toSearchResults(res);
       posts += res.data?.length ?? 0;
       results.push(...batch);
@@ -80,15 +111,22 @@ export async function searchX(
       }
     } catch (err) {
       console.error(`[X] Search failed for "${query.slice(0, 60)}…":`, err);
+      errors.push(describeError(err));
+      if (err instanceof XApiError && (err.status === 429 || err.status === 401 || err.status === 403)) {
+        const remaining = queries.length - i - 1;
+        if (remaining > 0) errors.push(`skipped ${remaining} remaining X quer${remaining > 1 ? "ies" : "y"}`);
+        break;
+      }
     }
-    if (queries.length > 1) await sleep(1100); // recent search is rate limited per 15 min window; be gentle
+    if (i < queries.length - 1) await sleep(1100); // recent search is rate limited per 15 min window; be gentle
   }
 
   await saveCursors(cursors);
 
   const deduped = dedupeByUrl(results);
-  onStatus?.(`🐦 X API: ${posts} new posts → ${deduped.length} candidate links`);
-  console.log(`[X] ${posts} posts → ${deduped.length} candidates`);
+  const summary = `🐦 X API: ${posts} new posts → ${deduped.length} candidate links`;
+  onStatus?.(errors.length > 0 ? `${summary}\n⚠️ ${errors.join("; ")}` : summary);
+  console.log(`[X] ${posts} posts → ${deduped.length} candidates${errors.length ? ` (${errors.length} errors)` : ""}`);
   return deduped;
 }
 
@@ -108,7 +146,7 @@ async function fetchRecent(query: string, sinceId?: string): Promise<XSearchResp
   });
 
   if (!response.ok) {
-    throw new Error(`X API ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    throw new XApiError(response.status, await response.text());
   }
   return (await response.json()) as XSearchResponse;
 }
