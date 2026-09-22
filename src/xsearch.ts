@@ -8,6 +8,12 @@ import type { SearchResult } from "./types.js";
 const X_API_URL = "https://api.x.com/2/tweets/search/recent";
 const CURSOR_FILE = "./data/x-cursor.json";
 
+// Pay-per-use X plans bill per post read, so every sweep works against a post
+// budget. Recent search accepts 10..100 results per request.
+const DEFAULT_POSTS_PER_RUN = 60;
+const MIN_PAGE = 10;
+const MAX_PAGE = 100;
+
 const OPPORTUNITY_TERMS = `(hackathon OR #hackathon OR buildathon OR "coding competition" OR "developer challenge")`;
 const ACTION_TERMS = `(apply OR register OR registration OR deadline OR prize OR prizes OR "submissions open" OR "applications open")`;
 const FILTERS = `has:links -is:retweet -is:reply lang:en`;
@@ -53,6 +59,20 @@ interface CursorStore {
   [queryKey: string]: { sinceId: string; updatedAt: string };
 }
 
+interface UsageStore {
+  month: string; // YYYY-MM
+  posts: number;
+  requests: number;
+}
+
+const USAGE_KEY = "__usage";
+type StateFile = CursorStore & { [USAGE_KEY]?: UsageStore };
+
+export function postsPerRun(): number {
+  const n = Number(process.env.X_MAX_POSTS_PER_RUN);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_POSTS_PER_RUN;
+}
+
 export function isXConfigured(): boolean {
   return Boolean(process.env.X_BEARER_TOKEN);
 }
@@ -79,61 +99,77 @@ export async function searchX(
 ): Promise<SearchResult[]> {
   if (!isXConfigured()) return [];
 
-  const cursors = await loadCursors();
+  const state = await loadState();
+  const usage = currentUsage(state);
   const results: SearchResult[] = [];
   let posts = 0;
 
   const errors: string[] = [];
+  const budget = postsPerRun();
+  // Split the run budget evenly across queries; anything under the API minimum is skipped
+  const perQuery = Math.min(MAX_PAGE, Math.floor(budget / queries.length));
+  const runQueries = perQuery >= MIN_PAGE ? queries : queries.slice(0, Math.max(1, Math.floor(budget / MIN_PAGE)));
+  const pageSize = Math.max(MIN_PAGE, Math.min(MAX_PAGE, Math.floor(budget / runQueries.length)));
+  if (runQueries.length < queries.length) {
+    errors.push(`budget ${budget} posts/run only covers ${runQueries.length}/${queries.length} queries (raise X\\_MAX\\_POSTS\\_PER\\_RUN)`);
+  }
 
-  for (let i = 0; i < queries.length; i++) {
-    const query = queries[i];
+  for (let i = 0; i < runQueries.length; i++) {
+    const query = runQueries[i];
     const key = cursorKey(query);
-    const sinceId = cursors[key]?.sinceId;
+    const sinceId = state[key]?.sinceId;
     try {
       let res: XSearchResponse;
       try {
-        res = await fetchRecent(query, sinceId);
+        usage.requests++;
+        res = await fetchRecent(query, sinceId, pageSize);
       } catch (err) {
         // since_id older than the 7-day window is rejected with 400 — drop the cursor and retry
         if (err instanceof XApiError && err.status === 400 && sinceId) {
           console.warn(`[X] since_id ${sinceId} rejected, retrying without cursor`);
-          delete cursors[key];
-          res = await fetchRecent(query, undefined);
+          delete state[key];
+          usage.requests++;
+          res = await fetchRecent(query, undefined, pageSize);
         } else {
           throw err;
         }
       }
       const batch = toSearchResults(res);
-      posts += res.data?.length ?? 0;
+      const count = res.data?.length ?? 0;
+      posts += count;
+      usage.posts += count;
       results.push(...batch);
       if (res.meta?.newest_id) {
-        cursors[key] = { sinceId: res.meta.newest_id, updatedAt: new Date().toISOString() };
+        state[key] = { sinceId: res.meta.newest_id, updatedAt: new Date().toISOString() };
       }
     } catch (err) {
       console.error(`[X] Search failed for "${query.slice(0, 60)}…":`, err);
       errors.push(describeError(err));
       if (err instanceof XApiError && (err.status === 429 || err.status === 401 || err.status === 403)) {
-        const remaining = queries.length - i - 1;
+        const remaining = runQueries.length - i - 1;
         if (remaining > 0) errors.push(`skipped ${remaining} remaining X quer${remaining > 1 ? "ies" : "y"}`);
         break;
       }
     }
-    if (i < queries.length - 1) await sleep(1100); // recent search is rate limited per 15 min window; be gentle
+    if (i < runQueries.length - 1) await sleep(1100); // recent search is rate limited per 15 min window; be gentle
   }
 
-  await saveCursors(cursors);
+  state[USAGE_KEY] = usage;
+  await saveState(state);
 
   const deduped = dedupeByUrl(results);
-  const summary = `🐦 X API: ${posts} new posts → ${deduped.length} candidate links`;
+  const summary =
+    `🐦 X API: ${posts} new posts → ${deduped.length} candidate links ` +
+    `(budget ${budget}/run · ${usage.posts} posts read this month)`;
   onStatus?.(errors.length > 0 ? `${summary}\n⚠️ ${errors.join("; ")}` : summary);
   console.log(`[X] ${posts} posts → ${deduped.length} candidates${errors.length ? ` (${errors.length} errors)` : ""}`);
   return deduped;
 }
 
-async function fetchRecent(query: string, sinceId?: string): Promise<XSearchResponse> {
+async function fetchRecent(query: string, sinceId: string | undefined, maxResults: number): Promise<XSearchResponse> {
   const params = new URLSearchParams({
     query: query.replace(/\s+/g, " ").trim(),
-    max_results: "100",
+    max_results: String(maxResults),
     "tweet.fields": "created_at,author_id,entities,attachments,public_metrics",
     expansions: "author_id,attachments.media_keys",
     "media.fields": "media_key,type,url,preview_image_url",
@@ -239,19 +275,26 @@ function cursorKey(query: string): string {
   return Bun.hash(query.replace(/\s+/g, " ").trim()).toString(16);
 }
 
-async function loadCursors(): Promise<CursorStore> {
+function currentUsage(state: StateFile): UsageStore {
+  const month = new Date().toISOString().slice(0, 7);
+  const prev = state[USAGE_KEY];
+  if (prev && prev.month === month) return { ...prev };
+  return { month, posts: 0, requests: 0 };
+}
+
+async function loadState(): Promise<StateFile> {
   try {
     const file = Bun.file(CURSOR_FILE);
-    if (await file.exists()) return (await file.json()) as CursorStore;
+    if (await file.exists()) return (await file.json()) as StateFile;
   } catch (err) {
     console.error("[X] Failed to read cursor file:", err);
   }
   return {};
 }
 
-async function saveCursors(cursors: CursorStore): Promise<void> {
+async function saveState(state: StateFile): Promise<void> {
   try {
-    await Bun.write(CURSOR_FILE, JSON.stringify(cursors, null, 2));
+    await Bun.write(CURSOR_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     console.error("[X] Failed to save cursor file:", err);
   }

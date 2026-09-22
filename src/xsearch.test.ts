@@ -93,6 +93,29 @@ test("retries without since_id when the stored cursor is rejected", async () => 
   expect(results.length).toBeGreaterThan(0);
 });
 
+test("splits the per-run post budget across queries and reports usage", async () => {
+  process.env.X_MAX_POSTS_PER_RUN = "40";
+  const urls: string[] = [];
+  const statuses: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify(sample), { headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
+  await searchX(["b1", "b2"], (m) => statuses.push(m));
+  expect(urls.length).toBe(2);
+  expect(new URL(urls[0]).searchParams.get("max_results")).toBe("20");
+  expect(statuses[0]).toContain("budget 40/run");
+
+  // Too small for all queries → only as many as the API minimum allows
+  process.env.X_MAX_POSTS_PER_RUN = "15";
+  urls.length = 0;
+  await searchX(["c1", "c2", "c3"], (m) => statuses.push(m));
+  expect(urls.length).toBe(1);
+  expect(new URL(urls[0]).searchParams.get("max_results")).toBe("15");
+  expect(statuses.at(-1)).toContain("only covers 1/3");
+  delete process.env.X_MAX_POSTS_PER_RUN;
+});
+
 test("returns nothing when X is not configured", async () => {
   delete process.env.X_BEARER_TOKEN;
   expect(await searchX(["hackathon"])).toEqual([]);
