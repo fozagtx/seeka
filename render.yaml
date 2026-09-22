@@ -14,6 +14,8 @@ services:
         sync: false
       - key: X_BEARER_TOKEN
         sync: false
+      - key: X_MAX_POSTS_PER_RUN
+        value: "60"
       - key: FIRECRAWL_API_KEY
         sync: false
       - key: FIRESCRAPER_API_KEY
